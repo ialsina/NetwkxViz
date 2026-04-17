@@ -11,6 +11,7 @@ import {
   BackgroundVariant,
   Handle,
   MarkerType,
+  Panel,
   Position,
   ReactFlow,
   type Edge,
@@ -20,11 +21,19 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import {
+  DEFAULT_GRAPH_PALETTE_ID,
+  GRAPH_COLOR_PALETTES,
+  getGraphPaletteById,
+  hexToRgba,
+  type GraphColorPalette,
+} from './graphPalettes'
+import {
   type DagreLayoutScheme,
   type DagreLayoutSpacing,
   type DotNodeType,
   type NodeColorMode,
   buildExpandedGraphFromJobs,
+  collectExpandedColorLegendEntries,
   edgeCrossesChunkBoundaries,
   layoutWithDagre,
   parseJobsFileJson,
@@ -38,9 +47,23 @@ function memberLabelsFromCount(count: number): string[] {
   return Array.from({ length: n }, (_, i) => `member${i + 1}`)
 }
 
+function legendColorByHeading(mode: NodeColorMode): string {
+  switch (mode) {
+    case 'name':
+      return 'job name'
+    case 'running':
+      return 'RUNNING level'
+    case 'platform':
+      return 'PLATFORM'
+    case 'member':
+      return 'member label'
+    case 'chunk':
+      return 'chunk index'
+  }
+}
+
 type GraphConfig = {
   curvature: 'bezier' | 'smoothstep' | 'straight'
-  edgeColor: string
   edgeWidth: number
   edgeAnimated: boolean
   backgroundVariant: BackgroundVariant
@@ -152,11 +175,16 @@ const SAMPLE_URL = '/jobs-sample.json'
 export default function FlowDemo() {
   const config: GraphConfig = {
     curvature: 'bezier',
-    edgeColor: '#8b5cf6',
     edgeWidth: 1.5,
     edgeAnimated: false,
     backgroundVariant: BackgroundVariant.Dots,
   }
+
+  const [paletteId, setPaletteId] = useState<string>(DEFAULT_GRAPH_PALETTE_ID)
+  const palette: GraphColorPalette = useMemo(
+    () => getGraphPaletteById(paletteId),
+    [paletteId],
+  )
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [jobRows, setJobRows] = useState<JobRow[] | null>(null)
@@ -170,6 +198,7 @@ export default function FlowDemo() {
   const [memberCount, setMemberCount] = useState(1)
   const [chunksCount, setChunksCount] = useState(1)
   const [splitsCount, setSplitsCount] = useState(1)
+  const [showLegend, setShowLegend] = useState(false)
 
   const dimensionParams = useMemo((): DimensionParams => {
     return {
@@ -187,6 +216,10 @@ export default function FlowDemo() {
     }
     const built = buildExpandedGraphFromJobs(jobRows, dimensionParams, {
       colorMode: nodeColorMode,
+      colorPalette: {
+        nodeSaturation: palette.nodeSaturation,
+        nodeLightness: palette.nodeLightness,
+      },
     })
     const laidOut = layoutWithDagre(built.nodes, built.edges, {
       scheme: layoutScheme,
@@ -207,9 +240,9 @@ export default function FlowDemo() {
         ...e,
         type: config.curvature,
         animated: config.edgeAnimated,
-        markerEnd: { type: MarkerType.ArrowClosed, color: config.edgeColor },
+        markerEnd: { type: MarkerType.ArrowClosed, color: palette.edgeColor },
         style: {
-          stroke: config.edgeColor,
+          stroke: palette.edgeColor,
           strokeWidth: config.edgeWidth,
           ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
         },
@@ -228,13 +261,18 @@ export default function FlowDemo() {
     dimensionParams,
     showJobNames,
     nodeColorMode,
+    palette,
     layoutScheme,
     layoutSpacing,
     config.curvature,
     config.edgeAnimated,
-    config.edgeColor,
     config.edgeWidth,
   ])
+
+  const colorLegendEntries = useMemo(
+    () => collectExpandedColorLegendEntries(nodes, nodeColorMode),
+    [nodes, nodeColorMode],
+  )
 
   const onPickFile = () => fileInputRef.current?.click()
 
@@ -262,7 +300,7 @@ export default function FlowDemo() {
     setLoadingSample(true)
     setFileLabel('jobs-sample.json (bundled)')
     try {
-      const res = await fetch(SAMPLE_URL)
+      const res = await fetch(SAMPLE_URL, { cache: 'no-store' })
       if (!res.ok) throw new Error(`Could not load ${SAMPLE_URL} (${res.status})`)
       const text = await res.text()
       setJobRows(parseJobsFileJson(text))
@@ -318,6 +356,7 @@ export default function FlowDemo() {
     nodes,
     edges,
     dimensionParams,
+    paletteId,
     layoutScheme,
     layoutSpacing,
     fitGraphView,
@@ -334,29 +373,53 @@ export default function FlowDemo() {
         width: '100%',
         height: '100%',
         overflow: 'hidden',
-        background:
-          'radial-gradient(1400px 520px at 30% 0%, rgba(139,92,246,0.18), rgba(0,0,0,0))',
+        background: `radial-gradient(1400px 520px at 30% 0%, ${hexToRgba(palette.edgeColor, 0.2)}, rgba(0,0,0,0))`,
       }}
     >
       <div
         style={{
           display: 'flex',
           flexWrap: 'wrap',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           justifyContent: 'space-between',
           padding: '14px 16px',
           borderBottom: '1px solid var(--border)',
           gap: 12,
         }}
       >
-        <div style={{ textAlign: 'left', flex: '1 1 200px' }}>
-          <div style={{ fontWeight: 600, color: 'var(--text-h)' }}>
+        <div
+          style={{
+            textAlign: 'left',
+            flex: '1 1 220px',
+            minWidth: 0,
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 600,
+              fontSize: '1.125rem',
+              color: 'var(--text-h)',
+              letterSpacing: '-0.02em',
+            }}
+          >
             Job dependency graph
           </div>
-          <div style={{ fontSize: 13, opacity: 0.85 }}>
-            JSON array of objects with <code>name</code> and <code>DEPENDENCIES</code>{' '}
-            (same shape as <code>data/jobs.json</code>). Choose a file or load the sample.
-          </div>
+          {fileLabel ? (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                color: 'var(--text-h)',
+              }}
+            >
+              <strong>File:</strong> {fileLabel}
+              {nodes.length > 0 ? (
+                <span style={{ opacity: 0.75, marginLeft: 8 }}>
+                  · {nodes.length} nodes · {edges.length} edges
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         <div
@@ -450,6 +513,30 @@ export default function FlowDemo() {
               gap: 6,
               fontSize: 12,
               color: 'var(--text-h)',
+            }}
+          >
+            <span style={{ whiteSpace: 'nowrap' }}>Palette</span>
+            <select
+              className="flow-toolbar-select"
+              value={paletteId}
+              title="Colors: edge and arrow use this accent; node dots use the same theme (saturation/lightness) with varied hues"
+              aria-label="Color palette"
+              onChange={(e) => setPaletteId(e.target.value)}
+            >
+              {GRAPH_COLOR_PALETTES.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              color: 'var(--text-h)',
               opacity: jobRows ? 1 : 0.45,
             }}
           >
@@ -484,6 +571,15 @@ export default function FlowDemo() {
           <button
             type="button"
             className="flow-toolbar-btn"
+            onClick={() => setShowLegend((v) => !v)}
+            aria-pressed={showLegend}
+            title="Toggle graph legend (edges and nodes)"
+          >
+            {showLegend ? 'Hide legend' : 'Show legend'}
+          </button>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
             onClick={fitGraphView}
             disabled={jobRows === null || nodes.length === 0}
             title="Fit and center the graph in the view"
@@ -500,25 +596,6 @@ export default function FlowDemo() {
           </button>
         </div>
       </div>
-
-      {fileLabel ? (
-        <div
-          style={{
-            fontSize: 12,
-            padding: '6px 16px',
-            borderBottom: '1px solid var(--border)',
-            color: 'var(--text-h)',
-            textAlign: 'left',
-          }}
-        >
-          <strong>File:</strong> {fileLabel}
-          {nodes.length > 0 ? (
-            <span style={{ opacity: 0.75, marginLeft: 8 }}>
-              · {nodes.length} nodes · {edges.length} edges
-            </span>
-          ) : null}
-        </div>
-      ) : null}
 
       <div className="flow-dim-bar">
         <div className="flow-dim-field">
@@ -694,6 +771,47 @@ export default function FlowDemo() {
                 color="rgba(148,163,184,0.35)"
                 variant={config.backgroundVariant}
               />
+              {showLegend ? (
+                <Panel position="bottom-left">
+                  <div className="flow-legend">
+                    <div className="flow-legend-title">Color key</div>
+                    <p className="flow-legend-meta">
+                      Palette <strong>{palette.label}</strong>
+                      {' · '}
+                      Color by <strong>{legendColorByHeading(nodeColorMode)}</strong>
+                    </p>
+                    <div className="flow-legend-scroll">
+                      <div className="flow-legend-row">
+                        <svg width={40} height={14} aria-hidden>
+                          <line
+                            x1={2}
+                            y1={7}
+                            x2={38}
+                            y2={7}
+                            stroke={palette.edgeColor}
+                            strokeWidth={2}
+                            fill="none"
+                          />
+                        </svg>
+                        <span>
+                          <strong>Edges &amp; arrows</strong> — dependency lines and
+                          arrowheads ({palette.label} theme).
+                        </span>
+                      </div>
+                      {colorLegendEntries.map((e) => (
+                        <div key={e.key} className="flow-legend-row">
+                          <span
+                            className="flow-legend-swatch"
+                            style={{ background: e.color }}
+                            title={e.label}
+                          />
+                          <span>{e.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </Panel>
+              ) : null}
             </ReactFlow>
           </div>
         )}

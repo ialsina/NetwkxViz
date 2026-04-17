@@ -28,6 +28,10 @@ export type DotNodeData = {
   color?: string
   isExtra?: boolean
   showLabel?: boolean
+  /** Hash key for the active Color by mode (for legend); omitted for extra/gray nodes. */
+  colorLegendKey?: string
+  /** Human label matching `colorLegendKey` (for legend). */
+  colorLegendLabel?: string
 }
 
 export type DotNodeType = Node<DotNodeData, 'dot'>
@@ -256,16 +260,74 @@ export function colorForJobName(name: string, isExtra: boolean): string {
   return `hsl(${hue} 55% 52%)`
 }
 
+/** HSL S/L paired with a hashed hue for node dots (from the active graph palette). */
+export type GraphColorSampler = {
+  nodeSaturation: string
+  nodeLightness: string
+}
+
+const DEFAULT_COLOR_SAMPLER: GraphColorSampler = {
+  nodeSaturation: '55%',
+  nodeLightness: '52%',
+}
+
 /** What to base node dot colors on in the expanded graph. */
 export type NodeColorMode = 'name' | 'running' | 'platform' | 'member' | 'chunk'
 
-function hslFromKey(key: string): string {
-  return `hsl(${hashHue(key)} 55% 52%)`
+function hslFromKey(key: string, sampler: GraphColorSampler): string {
+  return `hsl(${hashHue(key)} ${sampler.nodeSaturation} ${sampler.nodeLightness})`
 }
 
 /**
  * Picks a stable color for an expanded node instance. Extra dependency-only nodes stay neutral gray.
  */
+/**
+ * Stable legend row for expanded nodes: same string ordering as {@link colorForExpandedNode}’s hash input.
+ * Returns `null` for dependency-only (“extra”) nodes that are always gray.
+ */
+export function colorLegendKeyAndLabel(
+  mode: NodeColorMode,
+  ctx: {
+    job: string
+    isExtra: boolean
+    running: RunningLevel
+    platform: string
+    member?: string
+    chunk?: number
+  },
+): { key: string; label: string } | null {
+  if (ctx.isExtra) return null
+  switch (mode) {
+    case 'name':
+      return { key: ctx.job, label: ctx.job }
+    case 'running':
+      return { key: ctx.running, label: `RUNNING: ${ctx.running}` }
+    case 'platform': {
+      const p = ctx.platform.trim() || '(unset)'
+      return {
+        key: p,
+        label: p === '(unset)' ? 'PLATFORM (unset)' : `PLATFORM: ${p}`,
+      }
+    }
+    case 'member': {
+      const m = ctx.member ?? '—'
+      return {
+        key: m,
+        label: m === '—' ? 'Member (—)' : `Member: ${m}`,
+      }
+    }
+    case 'chunk': {
+      const c = ctx.chunk != null ? String(ctx.chunk) : '—'
+      return {
+        key: c,
+        label: ctx.chunk != null ? `Chunk ${ctx.chunk}` : 'Chunk (—)',
+      }
+    }
+    default:
+      return { key: ctx.job, label: ctx.job }
+  }
+}
+
 export function colorForExpandedNode(
   mode: NodeColorMode,
   ctx: {
@@ -276,27 +338,28 @@ export function colorForExpandedNode(
     member?: string
     chunk?: number
   },
+  sampler: GraphColorSampler = DEFAULT_COLOR_SAMPLER,
 ): string {
   if (ctx.isExtra) return 'rgba(148,163,184,0.85)'
   switch (mode) {
     case 'name':
-      return hslFromKey(ctx.job)
+      return hslFromKey(ctx.job, sampler)
     case 'running':
-      return hslFromKey(ctx.running)
+      return hslFromKey(ctx.running, sampler)
     case 'platform': {
       const p = ctx.platform.trim() || '(unset)'
-      return hslFromKey(p)
+      return hslFromKey(p, sampler)
     }
     case 'member': {
       const m = ctx.member ?? '—'
-      return hslFromKey(m)
+      return hslFromKey(m, sampler)
     }
     case 'chunk': {
       const c = ctx.chunk != null ? String(ctx.chunk) : '—'
-      return hslFromKey(c)
+      return hslFromKey(c, sampler)
     }
     default:
-      return hslFromKey(ctx.job)
+      return hslFromKey(ctx.job, sampler)
   }
 }
 
@@ -306,6 +369,70 @@ export type JobsGraphResult = {
   /** Names referenced as dependencies but missing from `name` column */
   extraDepNames: string[]
   parseErrors: string[]
+}
+
+/** One swatch row for the graph color legend (node dot colors + optional gray for extras). */
+export type ExpandedColorLegendEntry = {
+  key: string
+  label: string
+  color: string
+}
+
+/**
+ * Dedupe expanded nodes by `colorLegendKey` and sort labels for the legend panel.
+ * Includes a final row for gray dependency-only nodes if any appear in the graph.
+ */
+export function collectExpandedColorLegendEntries(
+  nodes: DotNodeType[],
+  colorMode: NodeColorMode,
+): ExpandedColorLegendEntry[] {
+  const map = new Map<string, ExpandedColorLegendEntry>()
+  let anyExtra = false
+  for (const n of nodes) {
+    if (n.data?.isExtra) {
+      anyExtra = true
+      continue
+    }
+    const k = n.data?.colorLegendKey
+    const lab = n.data?.colorLegendLabel
+    const col = n.data?.color
+    if (k && lab && col) {
+      map.set(k, { key: k, label: lab, color: col })
+    }
+  }
+  const arr = [...map.values()]
+  if (colorMode === 'chunk') {
+    arr.sort((a, b) => {
+      const na = parseInt(a.key, 10)
+      const nb = parseInt(b.key, 10)
+      if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
+      return a.key.localeCompare(b.key)
+    })
+  } else if (colorMode === 'running') {
+    const order: Record<RunningLevel, number> = {
+      once: 0,
+      date: 1,
+      member: 2,
+      chunk: 3,
+      split: 4,
+    }
+    arr.sort(
+      (a, b) =>
+        (order[a.key as RunningLevel] ?? 99) -
+          (order[b.key as RunningLevel] ?? 99) ||
+        a.key.localeCompare(b.key),
+    )
+  } else {
+    arr.sort((a, b) => a.key.localeCompare(b.key))
+  }
+  if (anyExtra) {
+    arr.push({
+      key: '__extra__',
+      label: 'Dependency-only job (not in file)',
+      color: 'rgba(148,163,184,0.85)',
+    })
+  }
+  return arr
 }
 
 /**
@@ -766,6 +893,8 @@ export function buildInstancesForJob(
 export type ExpandedGraphOptions = {
   /** How to color each node instance (default: by job name). */
   colorMode?: NodeColorMode
+  /** Saturation/lightness for HSL node colors (edge palette shares the same theme in the UI). */
+  colorPalette?: GraphColorSampler
 }
 
 /**
@@ -778,6 +907,8 @@ export function buildExpandedGraphFromJobs(
   options?: ExpandedGraphOptions,
 ): JobsGraphResult {
   const colorMode: NodeColorMode = options?.colorMode ?? 'name'
+  const colorSampler: GraphColorSampler =
+    options?.colorPalette ?? DEFAULT_COLOR_SAMPLER
   const flat = buildGraphFromJobs(rows)
   const runningByJob = new Map<string, RunningLevel>()
   const platformByJob = new Map<string, string>()
@@ -1034,14 +1165,16 @@ export function buildExpandedGraphFromJobs(
     const platform = platformByJob.get(job) ?? ''
     for (const it of inst) {
       const { line1, line2 } = formatJobInstanceLines(it, r, params)
-      const nodeColor = colorForExpandedNode(colorMode, {
+      const colorCtx = {
         job,
         isExtra,
         running: r,
         platform,
         member: it.member,
         chunk: it.chunk,
-      })
+      }
+      const nodeColor = colorForExpandedNode(colorMode, colorCtx, colorSampler)
+      const legend = colorLegendKeyAndLabel(colorMode, colorCtx)
       nodes.push({
         id: it.id,
         type: 'dot',
@@ -1051,6 +1184,9 @@ export function buildExpandedGraphFromJobs(
           ...(line2 ? { labelLine2: line2 } : {}),
           color: nodeColor,
           isExtra,
+          ...(legend
+            ? { colorLegendKey: legend.key, colorLegendLabel: legend.label }
+            : {}),
         },
       })
     }
