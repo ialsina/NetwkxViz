@@ -181,6 +181,50 @@ export function colorForJobName(name: string, isExtra: boolean): string {
   return `hsl(${hue} 55% 52%)`
 }
 
+/** What to base node dot colors on in the expanded graph. */
+export type NodeColorMode = 'name' | 'running' | 'platform' | 'member' | 'chunk'
+
+function hslFromKey(key: string): string {
+  return `hsl(${hashHue(key)} 55% 52%)`
+}
+
+/**
+ * Picks a stable color for an expanded node instance. Extra dependency-only nodes stay neutral gray.
+ */
+export function colorForExpandedNode(
+  mode: NodeColorMode,
+  ctx: {
+    job: string
+    isExtra: boolean
+    running: RunningLevel
+    platform: string
+    member?: string
+    chunk?: number
+  },
+): string {
+  if (ctx.isExtra) return 'rgba(148,163,184,0.85)'
+  switch (mode) {
+    case 'name':
+      return hslFromKey(ctx.job)
+    case 'running':
+      return hslFromKey(ctx.running)
+    case 'platform': {
+      const p = ctx.platform.trim() || '(unset)'
+      return hslFromKey(p)
+    }
+    case 'member': {
+      const m = ctx.member ?? '—'
+      return hslFromKey(m)
+    }
+    case 'chunk': {
+      const c = ctx.chunk != null ? String(ctx.chunk) : '—'
+      return hslFromKey(c)
+    }
+    default:
+      return hslFromKey(ctx.job)
+  }
+}
+
 export type JobsGraphResult = {
   nodes: DotNodeType[]
   edges: Edge<JobEdgeData>[]
@@ -642,6 +686,11 @@ export function buildInstancesForJob(
   }
 }
 
+export type ExpandedGraphOptions = {
+  /** How to color each node instance (default: by job name). */
+  colorMode?: NodeColorMode
+}
+
 /**
  * Expands the flat dependency graph using each job’s `RUNNING` value and the given
  * member / chunk / split counts (Autosubmit-style: once &lt; date/member &lt; chunk &lt; split).
@@ -649,12 +698,18 @@ export function buildInstancesForJob(
 export function buildExpandedGraphFromJobs(
   rows: JobRow[],
   params: DimensionParams,
+  options?: ExpandedGraphOptions,
 ): JobsGraphResult {
+  const colorMode: NodeColorMode = options?.colorMode ?? 'name'
   const flat = buildGraphFromJobs(rows)
   const runningByJob = new Map<string, RunningLevel>()
+  const platformByJob = new Map<string, string>()
   for (const row of rows) {
     const name = String(row.name ?? '').trim()
-    if (name) runningByJob.set(name, normalizeRunning(row.RUNNING))
+    if (name) {
+      runningByJob.set(name, normalizeRunning(row.RUNNING))
+      platformByJob.set(name, String(row.PLATFORM ?? ''))
+    }
   }
 
   const instancesByJob = new Map<string, JobInstance[]>()
@@ -898,10 +953,18 @@ export function buildExpandedGraphFromJobs(
   for (const job of allJobIds) {
     const inst = instancesByJob.get(job) ?? []
     const isExtra = !runningByJob.has(job)
-    const baseColor = colorForJobName(job, isExtra)
     const r = runningByJob.get(job) ?? 'once'
+    const platform = platformByJob.get(job) ?? ''
     for (const it of inst) {
       const { line1, line2 } = formatJobInstanceLines(it, r, params)
+      const nodeColor = colorForExpandedNode(colorMode, {
+        job,
+        isExtra,
+        running: r,
+        platform,
+        member: it.member,
+        chunk: it.chunk,
+      })
       nodes.push({
         id: it.id,
         type: 'dot',
@@ -909,7 +972,7 @@ export function buildExpandedGraphFromJobs(
         data: {
           label: line1,
           ...(line2 ? { labelLine2: line2 } : {}),
-          color: baseColor,
+          color: nodeColor,
           isExtra,
         },
       })

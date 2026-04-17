@@ -23,6 +23,7 @@ import {
   type DagreLayoutScheme,
   type DagreLayoutSpacing,
   type DotNodeType,
+  type NodeColorMode,
   buildExpandedGraphFromJobs,
   layoutWithDagre,
   parseJobsFileJson,
@@ -164,6 +165,7 @@ export default function FlowDemo() {
   const [showJobNames, setShowJobNames] = useState(true)
   const [layoutScheme, setLayoutScheme] = useState<DagreLayoutScheme>('tb')
   const [layoutSpacing, setLayoutSpacing] = useState<DagreLayoutSpacing>('normal')
+  const [nodeColorMode, setNodeColorMode] = useState<NodeColorMode>('name')
   const [memberCount, setMemberCount] = useState(1)
   const [chunksCount, setChunksCount] = useState(1)
   const [splitsCount, setSplitsCount] = useState(1)
@@ -182,7 +184,9 @@ export default function FlowDemo() {
     if (jobRows === null || jobRows.length === 0) {
       return { nodes: [] as DotNodeType[], edges: [] as Edge[] }
     }
-    const built = buildExpandedGraphFromJobs(jobRows, dimensionParams)
+    const built = buildExpandedGraphFromJobs(jobRows, dimensionParams, {
+      colorMode: nodeColorMode,
+    })
     const laidOut = layoutWithDagre(built.nodes, built.edges, {
       scheme: layoutScheme,
       spacing: layoutSpacing,
@@ -217,6 +221,7 @@ export default function FlowDemo() {
     jobRows,
     dimensionParams,
     showJobNames,
+    nodeColorMode,
     layoutScheme,
     layoutSpacing,
     config.curvature,
@@ -430,6 +435,34 @@ export default function FlowDemo() {
               <option value="compact">Compact</option>
               <option value="normal">Normal</option>
               <option value="relaxed">Relaxed</option>
+            </select>
+          </label>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              color: 'var(--text-h)',
+              opacity: jobRows ? 1 : 0.45,
+            }}
+          >
+            <span style={{ whiteSpace: 'nowrap' }}>Color by</span>
+            <select
+              className="flow-toolbar-select"
+              value={nodeColorMode}
+              disabled={jobRows === null}
+              title="Hue is hashed from the chosen field (PLATFORM from each job row)"
+              aria-label="Node color mode"
+              onChange={(e) =>
+                setNodeColorMode(e.target.value as NodeColorMode)
+              }
+            >
+              <option value="name">Job name</option>
+              <option value="running">RUNNING</option>
+              <option value="platform">Platform</option>
+              <option value="member">Member</option>
+              <option value="chunk">Chunk</option>
             </select>
           </label>
           <button
