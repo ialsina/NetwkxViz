@@ -17,20 +17,67 @@ export type DotNodeData = {
 
 export type DotNodeType = Node<DotNodeData, 'dot'>
 
-/** Strips trailing `+N` (e.g. `SIM+3` → `SIM`) used in some dependency strings. */
-export function normalizeDepToken(token: string): string {
-  const t = token.trim()
-  if (!t) return ''
-  return t.replace(/\+\d+$/, '')
+/** Extra fields on edges for dependency resolution (suffix split from base job name). */
+export type JobEdgeData = {
+  /** Original token or key as it appeared in `DEPENDENCIES`. */
+  dependencyRaw: string
+  /** Canonical job name used for `source` / node id (e.g. `SIM` from `SIM-1` or `SIM+1`). */
+  dependencyBase: string
+  /** Trailing variant only, e.g. `-1`, `+3`, or `null` if none. */
+  dependencySuffix: string | null
 }
 
 /**
- * Extracts dependency job names from `DEPENDENCIES`:
+ * Splits a dependency token into base name and optional numeric suffix:
+ * `SIM+3` → base `SIM`, suffix `+3`
+ * `SIM-1` → base `SIM`, suffix `-1`
+ * `SIM` → base `SIM`, suffix `null`
+ *
+ * `+N` is matched before `-N` so tokens like `X+12` are unambiguous.
+ */
+export function parseDepToken(raw: string): {
+  raw: string
+  base: string
+  suffix: string | null
+} {
+  const rawTrim = raw.trim()
+  if (!rawTrim) return { raw: rawTrim, base: '', suffix: null }
+
+  let base = rawTrim
+  let suffix: string | null = null
+
+  const plus = base.match(/\+\d+$/)
+  if (plus) {
+    suffix = plus[0]
+    base = base.slice(0, -plus[0].length)
+  } else {
+    const minus = base.match(/-\d+$/)
+    if (minus) {
+      suffix = minus[0]
+      base = base.slice(0, -minus[0].length)
+    }
+  }
+
+  base = base.trimEnd()
+  return { raw: rawTrim, base, suffix }
+}
+
+/** Returns only the canonical base name (for backwards compatibility). */
+export function normalizeDepToken(token: string): string {
+  return parseDepToken(token).base
+}
+
+export type ParsedDependency = ReturnType<typeof parseDepToken>
+
+/**
+ * Extracts dependency references from `DEPENDENCIES`:
  * - empty → none
  * - JSON object string → top-level keys (values may be null)
- * - otherwise → whitespace-separated tokens, each passed through `normalizeDepToken`
+ * - otherwise → whitespace-separated tokens
  */
-export function parseDependencyNames(raw: string | undefined | null): string[] {
+export function parseDependencyRefs(
+  raw: string | undefined | null,
+): ParsedDependency[] {
   if (raw == null) return []
   const s = String(raw).trim()
   if (!s) return []
@@ -39,7 +86,11 @@ export function parseDependencyNames(raw: string | undefined | null): string[] {
     try {
       const obj = JSON.parse(s) as Record<string, unknown>
       if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        return Object.keys(obj).map((k) => k.trim()).filter(Boolean)
+        return Object.keys(obj)
+          .map((k) => k.trim())
+          .filter(Boolean)
+          .map(parseDepToken)
+          .filter((p) => p.base)
       }
     } catch {
       return []
@@ -49,8 +100,16 @@ export function parseDependencyNames(raw: string | undefined | null): string[] {
 
   return s
     .split(/\s+/)
-    .map(normalizeDepToken)
-    .filter(Boolean)
+    .map(parseDepToken)
+    .filter((p) => p.base)
+}
+
+/**
+ * @deprecated Prefer `parseDependencyRefs` when you need suffix metadata.
+ * Returns canonical base names only.
+ */
+export function parseDependencyNames(raw: string | undefined | null): string[] {
+  return parseDependencyRefs(raw).map((p) => p.base)
 }
 
 function hashHue(s: string): number {
@@ -67,7 +126,7 @@ export function colorForJobName(name: string, isExtra: boolean): string {
 
 export type JobsGraphResult = {
   nodes: DotNodeType[]
-  edges: Edge[]
+  edges: Edge<JobEdgeData>[]
   /** Names referenced as dependencies but missing from `name` column */
   extraDepNames: string[]
   parseErrors: string[]
@@ -86,7 +145,7 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
     }
   }
 
-  const edges: Edge[] = []
+  const edges: Edge<JobEdgeData>[] = []
   const edgeKeys = new Set<string>()
   const referencedDeps = new Set<string>()
 
@@ -97,16 +156,22 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
       continue
     }
 
-    const deps = parseDependencyNames(row.DEPENDENCIES)
+    const deps = parseDependencyRefs(row.DEPENDENCIES)
     for (const dep of deps) {
-      referencedDeps.add(dep)
-      const key = `${dep}|${jobName}`
+      const { base, suffix, raw } = dep
+      referencedDeps.add(base)
+      const key = `${base}|${jobName}`
       if (edgeKeys.has(key)) continue
       edgeKeys.add(key)
       edges.push({
-        id: `e-${dep}->${jobName}`,
-        source: dep,
+        id: `e-${base}->${jobName}`,
+        source: base,
         target: jobName,
+        data: {
+          dependencyRaw: raw,
+          dependencyBase: base,
+          dependencySuffix: suffix,
+        },
       })
     }
   }

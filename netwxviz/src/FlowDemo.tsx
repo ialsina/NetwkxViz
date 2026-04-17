@@ -34,6 +34,8 @@ type GraphConfig = {
 }
 
 const DotNode = ({ data }: NodeProps<DotNodeType>) => {
+  const showLabel = (data as unknown as { showLabel?: boolean }).showLabel
+
   return (
     <div
       style={{
@@ -58,7 +60,7 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
         style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
       />
 
-      {data.showLabel ? (
+      {showLabel ? (
         <div
           style={{
             position: 'absolute',
