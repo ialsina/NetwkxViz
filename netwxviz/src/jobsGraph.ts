@@ -8,7 +8,12 @@ export type JobRow = {
   [key: string]: unknown
 }
 
-export type DotNodeData = { label: string; color?: string; isExtra?: boolean }
+export type DotNodeData = {
+  label: string
+  color?: string
+  isExtra?: boolean
+  showLabel?: boolean
+}
 
 export type DotNodeType = Node<DotNodeData, 'dot'>
 

@@ -57,6 +57,32 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
         position={Position.Bottom}
         style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
       />
+
+      {data.showLabel ? (
+        <div
+          style={{
+            position: 'absolute',
+            left: '50%',
+            top: 22,
+            transform: 'translateX(-50%)',
+            pointerEvents: 'none',
+            padding: '2px 6px',
+            borderRadius: 999,
+            fontSize: 11,
+            lineHeight: '14px',
+            color: 'var(--text-h)',
+            background: 'rgba(0,0,0,0.30)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            backdropFilter: 'blur(6px)',
+            whiteSpace: 'nowrap',
+            maxWidth: 220,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {data.label}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -77,6 +103,7 @@ export default function FlowDemo() {
   const [fileLabel, setFileLabel] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [loadingSample, setLoadingSample] = useState(false)
+  const [showJobNames, setShowJobNames] = useState(true)
 
   const nodeTypes = useMemo(() => ({ dot: DotNode }), [])
 
@@ -85,7 +112,13 @@ export default function FlowDemo() {
       return { nodes: [] as DotNodeType[], edges: [] as Edge[] }
     }
     const built = buildGraphFromJobs(jobRows)
-    const laidOut = layoutWithDagre(built.nodes, built.edges)
+    const laidOut = layoutWithDagre(built.nodes, built.edges).map((n) => ({
+      ...n,
+      data: {
+        ...n.data,
+        showLabel: showJobNames,
+      },
+    }))
     const styledEdges: Edge[] = built.edges.map((e) => ({
       ...e,
       type: config.curvature,
@@ -94,7 +127,14 @@ export default function FlowDemo() {
       style: { stroke: config.edgeColor, strokeWidth: config.edgeWidth },
     }))
     return { nodes: laidOut, edges: styledEdges }
-  }, [jobRows, config.curvature, config.edgeAnimated, config.edgeColor, config.edgeWidth])
+  }, [
+    jobRows,
+    showJobNames,
+    config.curvature,
+    config.edgeAnimated,
+    config.edgeColor,
+    config.edgeWidth,
+  ])
 
   const onPickFile = () => fileInputRef.current?.click()
 
@@ -207,6 +247,16 @@ export default function FlowDemo() {
             disabled={loadingSample}
           >
             {loadingSample ? 'Loading…' : 'Load sample'}
+          </button>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
+            onClick={() => setShowJobNames((v) => !v)}
+            disabled={jobRows === null}
+            aria-pressed={showJobNames}
+            title="Toggle job name labels"
+          >
+            {showJobNames ? 'Hide names' : 'Show names'}
           </button>
           <button
             type="button"
