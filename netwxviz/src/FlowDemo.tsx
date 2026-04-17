@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -14,6 +15,7 @@ import {
   ReactFlow,
   type Edge,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 
@@ -212,6 +214,40 @@ export default function FlowDemo() {
     setError(null)
   }, [])
 
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null)
+  const [flowReady, setFlowReady] = useState(false)
+
+  const fitGraphView = useCallback(() => {
+    rfInstanceRef.current?.fitView({
+      padding: 0.2,
+      duration: 200,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (jobRows === null || jobRows.length === 0) {
+      setFlowReady(false)
+      rfInstanceRef.current = null
+    }
+  }, [jobRows])
+
+  useEffect(() => {
+    if (
+      !flowReady ||
+      jobRows === null ||
+      jobRows.length === 0 ||
+      nodes.length === 0
+    ) {
+      return
+    }
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        fitGraphView()
+      })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [flowReady, jobRows, nodes, edges, dimensionParams, fitGraphView])
+
   return (
     <div
       className="flow-demo"
@@ -288,6 +324,15 @@ export default function FlowDemo() {
             title="Toggle job name labels"
           >
             {showJobNames ? 'Hide names' : 'Show names'}
+          </button>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
+            onClick={fitGraphView}
+            disabled={jobRows === null || nodes.length === 0}
+            title="Fit and center the graph in the view"
+          >
+            Center
           </button>
           <button
             type="button"
@@ -435,11 +480,12 @@ export default function FlowDemo() {
         </div>
       ) : null}
 
-      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+      <div className="flow-canvas-wrap">
         {jobRows === null ? (
           <div
             style={{
-              height: '100%',
+              position: 'absolute',
+              inset: 0,
               display: 'grid',
               placeItems: 'center',
               color: 'var(--text)',
@@ -452,7 +498,8 @@ export default function FlowDemo() {
         ) : jobRows.length === 0 ? (
           <div
             style={{
-              height: '100%',
+              position: 'absolute',
+              inset: 0,
               display: 'grid',
               placeItems: 'center',
               color: 'var(--text)',
@@ -463,30 +510,35 @@ export default function FlowDemo() {
             The file is a valid JSON array but contains no job objects.
           </div>
         ) : (
-          <ReactFlow
-            style={{ width: '100%', height: '100%' }}
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            minZoom={0.05}
-            maxZoom={2}
-            nodesDraggable
-            nodesConnectable={false}
-            elementsSelectable
-            panOnDrag
-            zoomOnScroll
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background
-              id="bg"
-              gap={18}
-              size={1.2}
-              color="rgba(148,163,184,0.35)"
-              variant={config.backgroundVariant}
-            />
-          </ReactFlow>
+          <div className="flow-canvas-inner">
+            <ReactFlow
+              style={{ width: '100%', height: '100%' }}
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              onInit={(instance) => {
+                rfInstanceRef.current = instance
+                setFlowReady(true)
+              }}
+              fitViewOptions={{ padding: 0.2 }}
+              minZoom={0.05}
+              maxZoom={2}
+              nodesDraggable
+              nodesConnectable={false}
+              elementsSelectable
+              panOnDrag
+              zoomOnScroll
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background
+                id="bg"
+                gap={18}
+                size={1.2}
+                color="rgba(148,163,184,0.35)"
+                variant={config.backgroundVariant}
+              />
+            </ReactFlow>
+          </div>
         )}
       </div>
     </div>
