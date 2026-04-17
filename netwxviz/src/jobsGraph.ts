@@ -143,6 +143,60 @@ export function normalizeDepToken(token: string): string {
   return parseDepToken(token).base
 }
 
+const EDGE_KIND_RANK: Record<AutosubmitDependencyKind, number> = {
+  previous_chunk: 3,
+  forward_offset: 2,
+  plain: 1,
+}
+
+/**
+ * Autosubmit JSON often lists both `JOB` and `JOB-1` under DEPENDENCIES. That parses
+ * to two references with the same base name → duplicate flat edges with identical
+ * source and target. React Flow draws them on top of each other (thick stroke, bad
+ * markers). Merge into one edge, preferring previous_chunk / forward_offset metadata.
+ */
+function mergeDuplicateSourceTargetEdges(
+  edges: Edge<JobEdgeData>[],
+): Edge<JobEdgeData>[] {
+  const groups = new Map<string, Edge<JobEdgeData>[]>()
+  for (const e of edges) {
+    const pair = `${e.source}\0${e.target}`
+    const list = groups.get(pair)
+    if (list) list.push(e)
+    else groups.set(pair, [e])
+  }
+  const out: Edge<JobEdgeData>[] = []
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      out.push(group[0])
+      continue
+    }
+    const sorted = [...group].sort(
+      (a, b) =>
+        EDGE_KIND_RANK[b.data!.autosubmitKind] -
+        EDGE_KIND_RANK[a.data!.autosubmitKind],
+    )
+    const best = sorted[0]
+    const d = best.data!
+    const rawMerged = [...new Set(group.map((x) => x.data!.dependencyRaw))].join(
+      ', ',
+    )
+    const mergedId = `e-${best.source}|${best.target}`.replace(
+      /[^a-zA-Z0-9_|.-]+/g,
+      '_',
+    )
+    out.push({
+      ...best,
+      id: mergedId,
+      data: {
+        ...d,
+        dependencyRaw: rawMerged,
+      },
+    })
+  }
+  return out
+}
+
 export type ParsedDependency = ReturnType<typeof parseDepToken>
 
 /**
@@ -305,6 +359,8 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
     }
   }
 
+  const mergedEdges = mergeDuplicateSourceTargetEdges(edges)
+
   const extraDepNames = [...referencedDeps].filter((d) => !names.has(d))
 
   const nodes: DotNodeType[] = []
@@ -327,7 +383,7 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
     })
   }
 
-  return { nodes, edges, extraDepNames, parseErrors }
+  return { nodes, edges: mergedEdges, extraDepNames, parseErrors }
 }
 
 /** Direction of dependency flow in Dagre (edges point “down” / “right” in graph coordinates). */
