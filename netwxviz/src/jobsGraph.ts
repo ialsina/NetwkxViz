@@ -143,15 +143,26 @@ export function getChunkIndexFromInstanceId(nodeId: string): number | undefined 
 }
 
 /**
- * Whether this dependency links different chunks: previous-chunk tokens (`SIM-1`, …),
- * or expanded nodes whose `|c:N|` indices differ.
+ * Whether to draw a **dashed** dependency stroke: explicit chunk offsets in the token
+ * (`SIM-1`, `JOB+10`, …) or expanded nodes whose `|c:N|` chunk indices differ.
  */
 export function edgeCrossesChunkBoundaries(
   sourceId: string,
   targetId: string,
   data: JobEdgeData | undefined,
 ): boolean {
-  if (data?.autosubmitKind === 'previous_chunk') return true
+  if (
+    data?.autosubmitKind === 'previous_chunk' &&
+    data.relativeChunkOffset != null
+  ) {
+    return true
+  }
+  if (
+    data?.autosubmitKind === 'forward_offset' &&
+    data.relativeChunkOffset != null
+  ) {
+    return true
+  }
   const cs = getChunkIndexFromInstanceId(sourceId)
   const ct = getChunkIndexFromInstanceId(targetId)
   return cs != null && ct != null && cs !== ct

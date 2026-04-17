@@ -234,7 +234,6 @@ export default function FlowDemo() {
     }))
     const styledEdges: Edge<JobEdgeData>[] = built.edges.map((e) => {
       const d = e.data
-      const suffix = d?.dependencySuffix
       const crossChunk = edgeCrossesChunkBoundaries(e.source, e.target, d)
       return {
         ...e,
@@ -246,13 +245,6 @@ export default function FlowDemo() {
           strokeWidth: config.edgeWidth,
           ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
         },
-        ...(suffix && !crossChunk
-          ? {
-              label: suffix,
-              labelStyle: { fontSize: 10, fill: 'var(--text-h)' },
-              labelBgStyle: { fill: 'rgba(0,0,0,0.35)' },
-            }
-          : {}),
       }
     })
     return { nodes: laidOut, edges: styledEdges }
