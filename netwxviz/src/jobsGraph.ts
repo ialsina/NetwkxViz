@@ -309,3 +309,347 @@ export function parseJobsFileJson(text: string): JobRow[] {
   }
   return data as JobRow[]
 }
+
+/** Autosubmit RUNNING levels (see `RUNNING` in job definitions). */
+export type RunningLevel = 'once' | 'date' | 'member' | 'chunk' | 'split'
+
+/** Finer levels have higher numbers (Autosubmit: once → … → chunk/split). */
+const RUNNING_ORDER: Record<RunningLevel, number> = {
+  once: 0,
+  /** Treated like `member` for ordering (same list dimension). */
+  date: 2,
+  member: 2,
+  chunk: 3,
+  split: 4,
+}
+
+export function normalizeRunning(raw: unknown): RunningLevel {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+  if (!s) return 'once'
+  if (s === 'date') return 'date'
+  if (s === 'member') return 'member'
+  if (s === 'chunk') return 'chunk'
+  if (s === 'split') return 'split'
+  return 'once'
+}
+
+function runningOrder(r: RunningLevel): number {
+  return RUNNING_ORDER[r] ?? 0
+}
+
+/** UI / experiment dimensions used to expand instances. */
+export type DimensionParams = {
+  members: string[]
+  numChunks: number
+  numSplits: number
+}
+
+export function parseMembersInput(s: string): string[] {
+  return s
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+
+function effectiveMembers(p: DimensionParams): string[] {
+  if (p.members.length > 0) return p.members
+  return ['default']
+}
+
+export type JobInstance = {
+  id: string
+  label: string
+  job: string
+  running: RunningLevel
+  member?: string
+  chunk?: number
+  split?: number
+}
+
+export function buildInstancesForJob(
+  job: string,
+  running: RunningLevel,
+  p: DimensionParams,
+): JobInstance[] {
+  const M = effectiveMembers(p)
+  const C = Math.max(1, p.numChunks)
+  const S = Math.max(1, p.numSplits)
+
+  switch (running) {
+    case 'once':
+      return [{ id: job, label: job, job, running }]
+    case 'date':
+    case 'member':
+      return M.map((m) => ({
+        id: `${job}@m:${encodeURIComponent(m)}`,
+        label: `${job} · ${m}`,
+        job,
+        member: m,
+        running,
+      }))
+    case 'chunk': {
+      const out: JobInstance[] = []
+      for (const m of M) {
+        for (let c = 1; c <= C; c++) {
+          out.push({
+            id: `${job}|m:${encodeURIComponent(m)}|c:${c}`,
+            label: `${job} · ${m} · #${c}`,
+            job,
+            member: m,
+            chunk: c,
+            running,
+          })
+        }
+      }
+      return out
+    }
+    case 'split':
+      return Array.from({ length: S }, (_, i) => {
+        const sp = i + 1
+        return {
+          id: `${job}|s:${sp}`,
+          label: `${job} · split ${sp}`,
+          job,
+          split: sp,
+          running,
+        }
+      })
+    default:
+      return [{ id: job, label: job, job, running: 'once' }]
+  }
+}
+
+/**
+ * Expands the flat dependency graph using each job’s `RUNNING` value and the given
+ * member / chunk / split counts (Autosubmit-style: once &lt; date/member &lt; chunk &lt; split).
+ */
+export function buildExpandedGraphFromJobs(
+  rows: JobRow[],
+  params: DimensionParams,
+): JobsGraphResult {
+  const flat = buildGraphFromJobs(rows)
+  const runningByJob = new Map<string, RunningLevel>()
+  for (const row of rows) {
+    const name = String(row.name ?? '').trim()
+    if (name) runningByJob.set(name, normalizeRunning(row.RUNNING))
+  }
+
+  const instancesByJob = new Map<string, JobInstance[]>()
+  const allJobIds = new Set<string>()
+  for (const n of flat.nodes) {
+    allJobIds.add(n.id)
+  }
+
+  for (const job of allJobIds) {
+    const r = runningByJob.get(job) ?? 'once'
+    instancesByJob.set(job, buildInstancesForJob(job, r, params))
+  }
+
+  const expandedEdges: Edge<JobEdgeData>[] = []
+  const edgeSeen = new Set<string>()
+
+  const addEdge = (e: Edge<JobEdgeData>) => {
+    if (edgeSeen.has(e.id)) return
+    edgeSeen.add(e.id)
+    expandedEdges.push(e)
+  }
+
+  for (const e of flat.edges) {
+    const S = e.source
+    const T = e.target
+    const rS = runningByJob.get(S) ?? 'once'
+    const rT = runningByJob.get(T) ?? 'once'
+    const iS = instancesByJob.get(S) ?? []
+    const iT = instancesByJob.get(T) ?? []
+    const data = e.data
+    if (!data || iS.length === 0 || iT.length === 0) continue
+
+    if (
+      data.autosubmitKind === 'previous_chunk' &&
+      data.relativeChunkOffset === -1 &&
+      S === T &&
+      rS === 'chunk'
+    ) {
+      for (const m of effectiveMembers(params)) {
+        for (let c = 2; c <= Math.max(1, params.numChunks); c++) {
+          const idFrom = `${S}|m:${encodeURIComponent(m)}|c:${c - 1}`
+          const idTo = `${T}|m:${encodeURIComponent(m)}|c:${c}`
+          addEdge({
+            id: `exp-${idFrom}->${idTo}`,
+            source: idFrom,
+            target: idTo,
+            data,
+          })
+        }
+      }
+      continue
+    }
+
+    if (data.autosubmitKind === 'previous_chunk' && S === T && rS !== 'chunk') {
+      continue
+    }
+
+    const oS = runningOrder(rS)
+    const oT = runningOrder(rT)
+
+    if (oS === oT) {
+      if (rS === 'once') {
+        if (iS[0] && iT[0])
+          addEdge({
+            id: `exp-${iS[0].id}->${iT[0].id}-${e.id}`,
+            source: iS[0].id,
+            target: iT[0].id,
+            data,
+          })
+      } else if (rS === 'member' || rS === 'date') {
+        for (const a of iS) {
+          const b = iT.find((t) => t.member === a.member)
+          if (b)
+            addEdge({
+              id: `exp-${a.id}->${b.id}-${e.id}`,
+              source: a.id,
+              target: b.id,
+              data,
+            })
+        }
+      } else if (rS === 'chunk') {
+        for (const a of iS) {
+          const b = iT.find(
+            (t) => t.member === a.member && t.chunk === a.chunk,
+          )
+          if (b)
+            addEdge({
+              id: `exp-${a.id}->${b.id}-${e.id}`,
+              source: a.id,
+              target: b.id,
+              data,
+            })
+        }
+      } else if (rS === 'split') {
+        const n = Math.min(iS.length, iT.length)
+        for (let i = 0; i < n; i++) {
+          addEdge({
+            id: `exp-${iS[i].id}->${iT[i].id}-${e.id}`,
+            source: iS[i].id,
+            target: iT[i].id,
+            data,
+          })
+        }
+      }
+      continue
+    }
+
+    if (oS < oT) {
+      if (rS === 'once') {
+        for (const t of iT) {
+          addEdge({
+            id: `exp-${iS[0].id}->${t.id}-${e.id}`,
+            source: iS[0].id,
+            target: t.id,
+            data,
+          })
+        }
+      } else if ((rS === 'member' || rS === 'date') && rT === 'chunk') {
+        for (const t of iT) {
+          const s = iS.find((x) => x.member === t.member)
+          if (s)
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+        }
+      } else if (
+        (rS === 'member' || rS === 'date') &&
+        (rT === 'member' || rT === 'date')
+      ) {
+        for (const t of iT) {
+          const s = iS.find((x) => x.member === t.member)
+          if (s)
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+        }
+      } else {
+        for (const s of iS) {
+          for (const t of iT) {
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+          }
+        }
+      }
+      continue
+    }
+
+    if (oS > oT) {
+      if (rT === 'once') {
+        for (const s of iS) {
+          addEdge({
+            id: `exp-${s.id}->${iT[0].id}-${e.id}`,
+            source: s.id,
+            target: iT[0].id,
+            data,
+          })
+        }
+      } else if (rS === 'chunk' && rT === 'member') {
+        for (const t of iT) {
+          for (const s of iS.filter((x) => x.member === t.member)) {
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+          }
+        }
+      } else {
+        for (const s of iS) {
+          for (const t of iT) {
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  const nodes: DotNodeType[] = []
+  for (const job of allJobIds) {
+    const inst = instancesByJob.get(job) ?? []
+    const isExtra = !runningByJob.has(job)
+    const baseColor = colorForJobName(job, isExtra)
+    for (const it of inst) {
+      nodes.push({
+        id: it.id,
+        type: 'dot',
+        position: { x: 0, y: 0 },
+        data: {
+          label: it.label,
+          color: baseColor,
+          isExtra,
+        },
+      })
+    }
+  }
+
+  return {
+    nodes,
+    edges: expandedEdges,
+    extraDepNames: flat.extraDepNames,
+    parseErrors: flat.parseErrors,
+  }
+}

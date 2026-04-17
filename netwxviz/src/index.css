@@ -133,3 +133,20 @@ code {
 .flow-toolbar-btn--ghost {
   background: transparent;
 }
+
+.flow-dim-input {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.flow-dim-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

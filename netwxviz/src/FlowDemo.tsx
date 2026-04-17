@@ -19,9 +19,11 @@ import '@xyflow/react/dist/style.css'
 
 import {
   type DotNodeType,
-  buildGraphFromJobs,
+  buildExpandedGraphFromJobs,
   layoutWithDagre,
   parseJobsFileJson,
+  parseMembersInput,
+  type DimensionParams,
   type JobEdgeData,
   type JobRow,
 } from './jobsGraph'
@@ -107,6 +109,21 @@ export default function FlowDemo() {
   const [error, setError] = useState<string | null>(null)
   const [loadingSample, setLoadingSample] = useState(false)
   const [showJobNames, setShowJobNames] = useState(true)
+  const [membersInput, setMembersInput] = useState(
+    'member1, member2, member3',
+  )
+  const [chunksInput, setChunksInput] = useState('3')
+  const [splitsInput, setSplitsInput] = useState('30')
+
+  const dimensionParams = useMemo((): DimensionParams => {
+    const numChunks = Math.max(1, parseInt(chunksInput, 10) || 1)
+    const numSplits = Math.max(1, parseInt(splitsInput, 10) || 1)
+    return {
+      members: parseMembersInput(membersInput),
+      numChunks,
+      numSplits,
+    }
+  }, [membersInput, chunksInput, splitsInput])
 
   const nodeTypes = useMemo(() => ({ dot: DotNode }), [])
 
@@ -114,7 +131,7 @@ export default function FlowDemo() {
     if (jobRows === null || jobRows.length === 0) {
       return { nodes: [] as DotNodeType[], edges: [] as Edge[] }
     }
-    const built = buildGraphFromJobs(jobRows)
+    const built = buildExpandedGraphFromJobs(jobRows, dimensionParams)
     const laidOut = layoutWithDagre(built.nodes, built.edges).map((n) => ({
       ...n,
       data: {
@@ -143,6 +160,7 @@ export default function FlowDemo() {
     return { nodes: laidOut, edges: styledEdges }
   }, [
     jobRows,
+    dimensionParams,
     showJobNames,
     config.curvature,
     config.edgeAnimated,
@@ -299,6 +317,79 @@ export default function FlowDemo() {
               · {nodes.length} nodes · {edges.length} edges
             </span>
           ) : null}
+        </div>
+      ) : null}
+
+      {jobRows !== null && jobRows.length > 0 ? (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: 12,
+            padding: '12px 16px',
+            borderBottom: '1px solid var(--border)',
+            textAlign: 'left',
+            fontSize: 13,
+          }}
+        >
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
+              MEMBERS
+            </span>
+            <input
+              className="flow-dim-input"
+              value={membersInput}
+              onChange={(e) => setMembersInput(e.target.value)}
+              placeholder="member1, member2, member3"
+              title="Comma-separated member (or date) labels; used when RUNNING is member or date, and as the member axis for chunk jobs."
+              aria-label="Members list"
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
+              CHUNKS
+            </span>
+            <input
+              className="flow-dim-input"
+              type="text"
+              inputMode="numeric"
+              value={chunksInput}
+              onChange={(e) => setChunksInput(e.target.value)}
+              placeholder="3"
+              title="Number of chunks (≥1). Chunk-level jobs expand to one node per member × chunk."
+              aria-label="Number of chunks"
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
+              SPLITS
+            </span>
+            <input
+              className="flow-dim-input"
+              type="text"
+              inputMode="numeric"
+              value={splitsInput}
+              onChange={(e) => setSplitsInput(e.target.value)}
+              placeholder="30"
+              title="Number of splits (≥1). Used when RUNNING is split."
+              aria-label="Number of splits"
+            />
+          </label>
+          <div
+            style={{
+              gridColumn: '1 / -1',
+              fontSize: 12,
+              opacity: 0.82,
+              lineHeight: 1.45,
+            }}
+          >
+            Each job’s <code>RUNNING</code> value (<code>once</code>,{' '}
+            <code>date</code>, <code>member</code>, <code>chunk</code>,{' '}
+            <code>split</code>) controls how many instances are drawn from these
+            three fields. Example: <code>chunk</code> → members × chunks;{' '}
+            <code>SIM-1</code> links chunk <i>k</i> to chunk <i>k − 1</i> within
+            the same member.
+          </div>
         </div>
       ) : null}
 
