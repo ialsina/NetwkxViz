@@ -140,6 +140,47 @@ code {
   background: transparent;
 }
 
+.flow-dim-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px 28px;
+  padding: 16px 24px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-size: 13px;
+  align-items: start;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .flow-dim-bar {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+}
+
+.flow-dim-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.flow-dim-label {
+  color: var(--text-h);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.flow-dim-help {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  opacity: 0.82;
+  line-height: 1.45;
+  padding-top: 2px;
+}
+
 .flow-dim-input {
   font: inherit;
   font-size: 14px;
@@ -155,4 +196,49 @@ code {
 .flow-dim-input:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+.flow-dim-input--grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.flow-stepper .flow-dim-input.flow-dim-input--grow {
+  width: auto;
+  max-width: 100%;
+}
+
+.flow-dim-input--center {
+  text-align: center;
+}
+
+.flow-stepper {
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.flow-stepper-btn {
+  flex: 0 0 44px;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--accent-bg);
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.flow-stepper-btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+.flow-stepper-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

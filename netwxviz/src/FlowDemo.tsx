@@ -22,11 +22,15 @@ import {
   buildExpandedGraphFromJobs,
   layoutWithDagre,
   parseJobsFileJson,
-  parseMembersInput,
   type DimensionParams,
   type JobEdgeData,
   type JobRow,
 } from './jobsGraph'
+
+function memberLabelsFromCount(count: number): string[] {
+  const n = Math.max(1, count)
+  return Array.from({ length: n }, (_, i) => `member${i + 1}`)
+}
 
 type GraphConfig = {
   curvature: 'bezier' | 'smoothstep' | 'straight'
@@ -109,21 +113,17 @@ export default function FlowDemo() {
   const [error, setError] = useState<string | null>(null)
   const [loadingSample, setLoadingSample] = useState(false)
   const [showJobNames, setShowJobNames] = useState(true)
-  const [membersInput, setMembersInput] = useState(
-    'member1, member2, member3',
-  )
-  const [chunksInput, setChunksInput] = useState('3')
-  const [splitsInput, setSplitsInput] = useState('30')
+  const [memberCount, setMemberCount] = useState(1)
+  const [chunksCount, setChunksCount] = useState(1)
+  const [splitsCount, setSplitsCount] = useState(1)
 
   const dimensionParams = useMemo((): DimensionParams => {
-    const numChunks = Math.max(1, parseInt(chunksInput, 10) || 1)
-    const numSplits = Math.max(1, parseInt(splitsInput, 10) || 1)
     return {
-      members: parseMembersInput(membersInput),
-      numChunks,
-      numSplits,
+      members: memberLabelsFromCount(memberCount),
+      numChunks: Math.max(1, chunksCount),
+      numSplits: Math.max(1, splitsCount),
     }
-  }, [membersInput, chunksInput, splitsInput])
+  }, [memberCount, chunksCount, splitsCount])
 
   const nodeTypes = useMemo(() => ({ dot: DotNode }), [])
 
@@ -319,78 +319,106 @@ export default function FlowDemo() {
         </div>
       ) : null}
 
-      {jobRows !== null && jobRows.length > 0 ? (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-            gap: 12,
-            padding: '12px 16px',
-            borderBottom: '1px solid var(--border)',
-            textAlign: 'left',
-            fontSize: 13,
-          }}
-        >
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
-              MEMBERS
-            </span>
+      <div className="flow-dim-bar">
+        <div className="flow-dim-field">
+          <span className="flow-dim-label">MEMBERS</span>
+          <div className="flow-stepper">
             <input
-              className="flow-dim-input"
-              value={membersInput}
-              onChange={(e) => setMembersInput(e.target.value)}
-              placeholder="member1, member2, member3"
-              title="Comma-separated member (or date) labels; used when RUNNING is member or date, and as the member axis for chunk jobs."
+              className="flow-dim-input flow-dim-input--grow"
+              readOnly
+              value={memberLabelsFromCount(memberCount).join(', ')}
+              title="member1, member2, … — use + / − to change how many members."
               aria-label="Members list"
             />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
-              CHUNKS
-            </span>
-            <input
-              className="flow-dim-input"
-              type="text"
-              inputMode="numeric"
-              value={chunksInput}
-              onChange={(e) => setChunksInput(e.target.value)}
-              placeholder="3"
-              title="Number of chunks (≥1). Chunk-level jobs expand to one node per member × chunk."
-              aria-label="Number of chunks"
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ color: 'var(--text-h)', fontWeight: 500 }}>
-              SPLITS
-            </span>
-            <input
-              className="flow-dim-input"
-              type="text"
-              inputMode="numeric"
-              value={splitsInput}
-              onChange={(e) => setSplitsInput(e.target.value)}
-              placeholder="30"
-              title="Number of splits (≥1). Used when RUNNING is split."
-              aria-label="Number of splits"
-            />
-          </label>
-          <div
-            style={{
-              gridColumn: '1 / -1',
-              fontSize: 12,
-              opacity: 0.82,
-              lineHeight: 1.45,
-            }}
-          >
-            Each job’s <code>RUNNING</code> value (<code>once</code>,{' '}
-            <code>date</code>, <code>member</code>, <code>chunk</code>,{' '}
-            <code>split</code>) controls how many instances are drawn from these
-            three fields. Example: <code>chunk</code> → members × chunks;{' '}
-            <code>SIM-1</code> links chunk <i>k</i> to chunk <i>k − 1</i> within
-            the same member.
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Remove last member"
+              title="Remove last member (minimum 1)"
+              disabled={memberCount <= 1}
+              onClick={() => setMemberCount((c) => Math.max(1, c - 1))}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Add next member"
+              title="Add memberN+1"
+              onClick={() => setMemberCount((c) => c + 1)}
+            >
+              +
+            </button>
           </div>
         </div>
-      ) : null}
+        <div className="flow-dim-field">
+          <span className="flow-dim-label">CHUNKS</span>
+          <div className="flow-stepper">
+            <input
+              className="flow-dim-input flow-dim-input--grow flow-dim-input--center"
+              readOnly
+              value={String(chunksCount)}
+              title="Number of chunks (≥1)"
+              aria-label="Number of chunks"
+            />
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Decrease chunks"
+              title="Chunks (minimum 1)"
+              disabled={chunksCount <= 1}
+              onClick={() => setChunksCount((c) => Math.max(1, c - 1))}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Increase chunks"
+              onClick={() => setChunksCount((c) => c + 1)}
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div className="flow-dim-field">
+          <span className="flow-dim-label">SPLITS</span>
+          <div className="flow-stepper">
+            <input
+              className="flow-dim-input flow-dim-input--grow flow-dim-input--center"
+              readOnly
+              value={String(splitsCount)}
+              title="Number of splits (≥1)"
+              aria-label="Number of splits"
+            />
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Decrease splits"
+              title="Splits (minimum 1)"
+              disabled={splitsCount <= 1}
+              onClick={() => setSplitsCount((c) => Math.max(1, c - 1))}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="flow-stepper-btn"
+              aria-label="Increase splits"
+              onClick={() => setSplitsCount((c) => c + 1)}
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div className="flow-dim-help">
+          Each job’s <code>RUNNING</code> value (<code>once</code>,{' '}
+          <code>date</code>, <code>member</code>, <code>chunk</code>,{' '}
+          <code>split</code>) controls how many instances are drawn from these
+          three fields. Example: <code>chunk</code> → members × chunks;{' '}
+          <code>SIM-1</code> links chunk k to chunk k − 1 within the same member.
+        </div>
+      </div>
 
       {error ? (
         <div
