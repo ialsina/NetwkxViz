@@ -117,6 +117,27 @@ export function autosubmitMetaFromSuffix(
   return { autosubmitKind: 'plain', relativeChunkOffset: null }
 }
 
+/** Chunk index from an expanded instance node id (`…|c:N…`) if present. */
+export function getChunkIndexFromInstanceId(nodeId: string): number | undefined {
+  const m = nodeId.match(/\|c:(\d+)/)
+  return m ? parseInt(m[1], 10) : undefined
+}
+
+/**
+ * Whether this dependency links different chunks: previous-chunk tokens (`SIM-1`, …),
+ * or expanded nodes whose `|c:N|` indices differ.
+ */
+export function edgeCrossesChunkBoundaries(
+  sourceId: string,
+  targetId: string,
+  data: JobEdgeData | undefined,
+): boolean {
+  if (data?.autosubmitKind === 'previous_chunk') return true
+  const cs = getChunkIndexFromInstanceId(sourceId)
+  const ct = getChunkIndexFromInstanceId(targetId)
+  return cs != null && ct != null && cs !== ct
+}
+
 /** Returns only the canonical base name (for backwards compatibility). */
 export function normalizeDepToken(token: string): string {
   return parseDepToken(token).base

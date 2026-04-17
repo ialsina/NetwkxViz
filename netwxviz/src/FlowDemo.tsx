@@ -25,6 +25,7 @@ import {
   type DotNodeType,
   type NodeColorMode,
   buildExpandedGraphFromJobs,
+  edgeCrossesChunkBoundaries,
   layoutWithDagre,
   parseJobsFileJson,
   type DimensionParams,
@@ -201,13 +202,18 @@ export default function FlowDemo() {
     const styledEdges: Edge<JobEdgeData>[] = built.edges.map((e) => {
       const d = e.data
       const suffix = d?.dependencySuffix
+      const crossChunk = edgeCrossesChunkBoundaries(e.source, e.target, d)
       return {
         ...e,
         type: config.curvature,
         animated: config.edgeAnimated,
         markerEnd: { type: MarkerType.ArrowClosed, color: config.edgeColor },
-        style: { stroke: config.edgeColor, strokeWidth: config.edgeWidth },
-        ...(suffix
+        style: {
+          stroke: config.edgeColor,
+          strokeWidth: config.edgeWidth,
+          ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
+        },
+        ...(suffix && !crossChunk
           ? {
               label: suffix,
               labelStyle: { fontSize: 10, fill: 'var(--text-h)' },
