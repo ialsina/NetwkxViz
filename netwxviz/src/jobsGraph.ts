@@ -1,5 +1,5 @@
 import dagre from 'dagre'
-import type { Edge, Node } from '@xyflow/react'
+import { Position, type Edge, type Node } from '@xyflow/react'
 
 /**
  * Dependency semantics follow Autosubmit’s workflow model (see “Defining the workflow”):
@@ -265,24 +265,161 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
   return { nodes, edges, extraDepNames, parseErrors }
 }
 
-const NODE_W = 28
-const NODE_H = 28
+/** Direction of dependency flow in Dagre (edges point “down” / “right” in graph coordinates). */
+export type DagreLayoutScheme = 'tb' | 'bt' | 'lr' | 'rl'
 
-/** Assigns `position` using Dagre (TB). */
-export function layoutWithDagre(nodes: DotNodeType[], edges: Edge[]): DotNodeType[] {
+export type DagreLayoutSpacing = 'compact' | 'normal' | 'relaxed'
+
+export type DagreLayoutOptions = {
+  /** Default `tb` (top → bottom). `lr` often reads better for wide graphs. */
+  scheme?: DagreLayoutScheme
+  /** Extra space between nodes (also scales with label size). */
+  spacing?: DagreLayoutSpacing
+  /**
+   * Dagre ranker: `network-simplex` (default, balanced), `longest-path` (deeper stacks),
+   * `tight-tree` (narrower width).
+   */
+  ranker?: 'network-simplex' | 'tight-tree' | 'longest-path'
+  /** When false, nodes are sized as small dots (names hidden). */
+  showLabels?: boolean
+}
+
+const DOT_VISUAL = 18
+
+/**
+ * Approximate bounding box for layout so Dagre reserves space for labels below the dot.
+ * Must match `DotNode` padding, label card padding/border, and line-heights in `FlowDemo.tsx`.
+ */
+export function estimateNodeLayoutBox(
+  data: DotNodeData,
+  showLabels = true,
+): { width: number; height: number } {
+  if (!showLabels) {
+    return { width: 36, height: 36 }
+  }
+  const l1 = data.label ?? ''
+  const l2 = data.labelLine2
+  const padX = 8
+  const maxLabelW = 260
+  const charW1 = 6.75
+  const charW2 = 6.5
+  const w1 = Math.min(maxLabelW, l1.length * charW1 + padX * 2)
+  const w2 = l2
+    ? Math.min(maxLabelW, l2.length * charW2 + padX * 2)
+    : 0
+  const labelBlockW = Math.max(DOT_VISUAL + 8, w1, w2)
+
+  // Mirrors DotNode: outer padding, dot, marginTop on label, inner label div.
+  const outerPadTop = 4
+  const outerPadBottom = 6
+  const labelMarginTop = 4
+  const labelPadY = 8 // 4px + 4px (padding-top/bottom on the label card)
+  const labelBorderY = 2 // 1px + 1px
+  const line1Px = 14 // lineHeight on first span
+  const line2Px = 13 // lineHeight on second span
+  const flexGap = 2 // gap between the two lines
+  /** Extra slack for font metrics, rounding, and handle placement. */
+  const slackY = 8
+
+  const labelCardH = l2
+    ? labelPadY + line1Px + flexGap + line2Px + labelBorderY
+    : labelPadY + line1Px + labelBorderY
+
+  const height = Math.ceil(
+    outerPadTop +
+      DOT_VISUAL +
+      labelMarginTop +
+      labelCardH +
+      outerPadBottom +
+      slackY,
+  )
+
+  const width = Math.ceil(labelBlockW)
+  return { width, height }
+}
+
+function rankdirFromScheme(scheme: DagreLayoutScheme | undefined): 'TB' | 'BT' | 'LR' | 'RL' {
+  switch (scheme) {
+    case 'bt':
+      return 'BT'
+    case 'lr':
+      return 'LR'
+    case 'rl':
+      return 'RL'
+    case 'tb':
+    default:
+      return 'TB'
+  }
+}
+
+function handlePairForScheme(
+  scheme: DagreLayoutScheme | undefined,
+): { source: Position; target: Position } {
+  switch (scheme) {
+    case 'bt':
+      return { source: Position.Top, target: Position.Bottom }
+    case 'lr':
+      return { source: Position.Right, target: Position.Left }
+    case 'rl':
+      return { source: Position.Left, target: Position.Right }
+    case 'tb':
+    default:
+      return { source: Position.Bottom, target: Position.Top }
+  }
+}
+
+function spacingMultiplier(sp: DagreLayoutSpacing | undefined): number {
+  switch (sp) {
+    case 'compact':
+      return 0.82
+    case 'relaxed':
+      return 1.48
+    case 'normal':
+    default:
+      return 1
+  }
+}
+
+/** Assigns `position` using Dagre; node sizes include estimated label footprint to reduce overlap. */
+export function layoutWithDagre(
+  nodes: DotNodeType[],
+  edges: Edge[],
+  options?: DagreLayoutOptions,
+): DotNodeType[] {
   if (nodes.length === 0) return nodes
+
+  const scheme = options?.scheme ?? 'tb'
+  const rankdir = rankdirFromScheme(scheme)
+  const showLabels = options?.showLabels !== false
+  const mult = spacingMultiplier(options?.spacing)
+
+  const sizes = new Map<string, { width: number; height: number }>()
+  for (const n of nodes) {
+    sizes.set(n.id, estimateNodeLayoutBox(n.data, showLabels))
+  }
+
+  const widths = [...sizes.values()].map((s) => s.width)
+  const heights = [...sizes.values()].map((s) => s.height)
+  const avgW = widths.reduce((a, b) => a + b, 0) / widths.length
+  const avgH = heights.reduce((a, b) => a + b, 0) / heights.length
+
+  const nodesep = Math.round((28 + avgW * 0.22) * mult)
+  const ranksep = Math.round((44 + avgH * 0.28) * mult)
 
   const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}))
   g.setGraph({
-    rankdir: 'TB',
-    nodesep: 28,
-    ranksep: 56,
-    marginx: 24,
-    marginy: 24,
+    rankdir,
+    ranker: options?.ranker ?? 'network-simplex',
+    nodesep: Math.max(36, nodesep),
+    ranksep: Math.max(48, ranksep),
+    edgesep: 20,
+    marginx: 40,
+    marginy: 40,
   })
 
   for (const n of nodes) {
-    g.setNode(n.id, { width: NODE_W, height: NODE_H })
+    const s = sizes.get(n.id) ?? { width: 36, height: 36 }
+    g.setNode(n.id, { width: s.width, height: s.height })
   }
   for (const e of edges) {
     if (g.hasNode(e.source) && g.hasNode(e.target)) {
@@ -292,15 +429,33 @@ export function layoutWithDagre(nodes: DotNodeType[], edges: Edge[]): DotNodeTyp
 
   dagre.layout(g)
 
+  const { source: sourcePosition, target: targetPosition } =
+    handlePairForScheme(scheme)
+
   return nodes.map((n) => {
     const pos = g.node(n.id)
-    if (!pos) return n
+    const s = sizes.get(n.id) ?? { width: 36, height: 36 }
+    if (!pos) {
+      return {
+        ...n,
+        width: s.width,
+        height: s.height,
+        sourcePosition,
+        targetPosition,
+        style: { ...n.style, width: s.width, height: s.height },
+      }
+    }
     return {
       ...n,
       position: {
-        x: pos.x - NODE_W / 2,
-        y: pos.y - NODE_H / 2,
+        x: pos.x - s.width / 2,
+        y: pos.y - s.height / 2,
       },
+      width: s.width,
+      height: s.height,
+      sourcePosition,
+      targetPosition,
+      style: { ...n.style, width: s.width, height: s.height },
     }
   })
 }

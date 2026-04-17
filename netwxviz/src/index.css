@@ -157,6 +157,23 @@ code {
   background: transparent;
 }
 
+.flow-toolbar-select {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  cursor: pointer;
+  max-width: 180px;
+}
+
+.flow-toolbar-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .flow-dim-bar {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

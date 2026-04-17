@@ -20,6 +20,8 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import {
+  type DagreLayoutScheme,
+  type DagreLayoutSpacing,
   type DotNodeType,
   buildExpandedGraphFromJobs,
   layoutWithDagre,
@@ -42,43 +44,58 @@ type GraphConfig = {
   backgroundVariant: BackgroundVariant
 }
 
-const DotNode = ({ data }: NodeProps<DotNodeType>) => {
+const DotNode = ({
+  data,
+  width,
+  height,
+  sourcePosition = Position.Bottom,
+  targetPosition = Position.Top,
+}: NodeProps<DotNodeType>) => {
   const showLabel = (data as unknown as { showLabel?: boolean }).showLabel
   const line2 = data.labelLine2
   const a11yLabel =
     line2 != null && line2 !== '' ? `${data.label}\n${line2}` : data.label
 
+  const w = width ?? 36
+  const h = height ?? 36
+
   return (
     <div
       style={{
         position: 'relative',
-        width: 18,
-        height: 18,
-        borderRadius: 999,
-        background: data.color ?? 'var(--accent)',
-        boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+        width: w,
+        height: h,
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'flex-start',
+        padding: '4px 6px 6px',
+        overflow: 'visible',
       }}
       title={a11yLabel}
       aria-label={a11yLabel}
     >
       <Handle
         type="target"
-        position={Position.Top}
+        position={targetPosition}
         style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
       />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
+      <div
+        style={{
+          width: 18,
+          height: 18,
+          flexShrink: 0,
+          borderRadius: 999,
+          background: data.color ?? 'var(--accent)',
+          boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+        }}
       />
 
       {showLabel ? (
         <div
           style={{
-            position: 'absolute',
-            left: '50%',
-            top: 22,
-            transform: 'translateX(-50%)',
+            marginTop: 4,
             pointerEvents: 'none',
             padding: '4px 8px',
             borderRadius: 10,
@@ -88,7 +105,7 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
             background: 'rgba(0,0,0,0.30)',
             border: '1px solid rgba(255,255,255,0.12)',
             backdropFilter: 'blur(6px)',
-            maxWidth: 260,
+            maxWidth: '100%',
             overflow: 'hidden',
             textAlign: 'center',
             display: 'flex',
@@ -118,6 +135,12 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
           ) : null}
         </div>
       ) : null}
+
+      <Handle
+        type="source"
+        position={sourcePosition}
+        style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
+      />
     </div>
   )
 }
@@ -139,6 +162,8 @@ export default function FlowDemo() {
   const [error, setError] = useState<string | null>(null)
   const [loadingSample, setLoadingSample] = useState(false)
   const [showJobNames, setShowJobNames] = useState(true)
+  const [layoutScheme, setLayoutScheme] = useState<DagreLayoutScheme>('tb')
+  const [layoutSpacing, setLayoutSpacing] = useState<DagreLayoutSpacing>('normal')
   const [memberCount, setMemberCount] = useState(1)
   const [chunksCount, setChunksCount] = useState(1)
   const [splitsCount, setSplitsCount] = useState(1)
@@ -158,7 +183,11 @@ export default function FlowDemo() {
       return { nodes: [] as DotNodeType[], edges: [] as Edge[] }
     }
     const built = buildExpandedGraphFromJobs(jobRows, dimensionParams)
-    const laidOut = layoutWithDagre(built.nodes, built.edges).map((n) => ({
+    const laidOut = layoutWithDagre(built.nodes, built.edges, {
+      scheme: layoutScheme,
+      spacing: layoutSpacing,
+      showLabels: showJobNames,
+    }).map((n) => ({
       ...n,
       data: {
         ...n.data,
@@ -188,6 +217,8 @@ export default function FlowDemo() {
     jobRows,
     dimensionParams,
     showJobNames,
+    layoutScheme,
+    layoutSpacing,
     config.curvature,
     config.edgeAnimated,
     config.edgeColor,
@@ -270,7 +301,16 @@ export default function FlowDemo() {
       })
     })
     return () => cancelAnimationFrame(id)
-  }, [flowReady, jobRows, nodes, edges, dimensionParams, fitGraphView])
+  }, [
+    flowReady,
+    jobRows,
+    nodes,
+    edges,
+    dimensionParams,
+    layoutScheme,
+    layoutSpacing,
+    fitGraphView,
+  ])
 
   return (
     <div
@@ -339,6 +379,59 @@ export default function FlowDemo() {
           >
             {loadingSample ? 'Loading…' : 'Load sample'}
           </button>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              color: 'var(--text-h)',
+              opacity: jobRows ? 1 : 0.45,
+            }}
+          >
+            <span style={{ whiteSpace: 'nowrap' }}>Layout</span>
+            <select
+              className="flow-toolbar-select"
+              value={layoutScheme}
+              disabled={jobRows === null}
+              title="Graph direction (Dagre)"
+              aria-label="Layout direction"
+              onChange={(e) =>
+                setLayoutScheme(e.target.value as DagreLayoutScheme)
+              }
+            >
+              <option value="tb">Top → bottom</option>
+              <option value="lr">Left → right</option>
+              <option value="bt">Bottom → top</option>
+              <option value="rl">Right → left</option>
+            </select>
+          </label>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              color: 'var(--text-h)',
+              opacity: jobRows ? 1 : 0.45,
+            }}
+          >
+            <span style={{ whiteSpace: 'nowrap' }}>Spacing</span>
+            <select
+              className="flow-toolbar-select"
+              value={layoutSpacing}
+              disabled={jobRows === null}
+              title="Minimum gap between nodes (scales with label size)"
+              aria-label="Node spacing"
+              onChange={(e) =>
+                setLayoutSpacing(e.target.value as DagreLayoutSpacing)
+              }
+            >
+              <option value="compact">Compact</option>
+              <option value="normal">Normal</option>
+              <option value="relaxed">Relaxed</option>
+            </select>
+          </label>
           <button
             type="button"
             className="flow-toolbar-btn"
