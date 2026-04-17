@@ -405,17 +405,26 @@ export function buildInstancesForJob(
       }
       return out
     }
-    case 'split':
-      return Array.from({ length: S }, (_, i) => {
-        const sp = i + 1
-        return {
-          id: `${job}|s:${sp}`,
-          label: `${job} · split ${sp}`,
-          job,
-          split: sp,
-          running,
+    case 'split': {
+      // Split is the finest level: instances repeat per (member, chunk, split index).
+      const out: JobInstance[] = []
+      for (const m of M) {
+        for (let c = 1; c <= C; c++) {
+          for (let sp = 1; sp <= S; sp++) {
+            out.push({
+              id: `${job}|m:${encodeURIComponent(m)}|c:${c}|s:${sp}`,
+              label: `${job} · ${m} · #${c} · split ${sp}`,
+              job,
+              member: m,
+              chunk: c,
+              split: sp,
+              running,
+            })
+          }
         }
-      })
+      }
+      return out
+    }
     default:
       return [{ id: job, label: job, job, running: 'once' }]
   }
@@ -528,14 +537,20 @@ export function buildExpandedGraphFromJobs(
             })
         }
       } else if (rS === 'split') {
-        const n = Math.min(iS.length, iT.length)
-        for (let i = 0; i < n; i++) {
-          addEdge({
-            id: `exp-${iS[i].id}->${iT[i].id}-${e.id}`,
-            source: iS[i].id,
-            target: iT[i].id,
-            data,
-          })
+        for (const a of iS) {
+          const b = iT.find(
+            (t) =>
+              t.member === a.member &&
+              t.chunk === a.chunk &&
+              t.split === a.split,
+          )
+          if (b)
+            addEdge({
+              id: `exp-${a.id}->${b.id}-${e.id}`,
+              source: a.id,
+              target: b.id,
+              data,
+            })
         }
       }
       continue
@@ -565,6 +580,33 @@ export function buildExpandedGraphFromJobs(
       } else if (
         (rS === 'member' || rS === 'date') &&
         (rT === 'member' || rT === 'date')
+      ) {
+        for (const t of iT) {
+          const s = iS.find((x) => x.member === t.member)
+          if (s)
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+        }
+      } else if (rS === 'chunk' && rT === 'split') {
+        for (const s of iS) {
+          for (const t of iT) {
+            if (t.member === s.member && t.chunk === s.chunk) {
+              addEdge({
+                id: `exp-${s.id}->${t.id}-${e.id}`,
+                source: s.id,
+                target: t.id,
+                data,
+              })
+            }
+          }
+        }
+      } else if (
+        (rS === 'member' || rS === 'date') &&
+        rT === 'split'
       ) {
         for (const t of iT) {
           const s = iS.find((x) => x.member === t.member)
@@ -611,6 +653,19 @@ export function buildExpandedGraphFromJobs(
               data,
             })
           }
+        }
+      } else if (rS === 'split' && rT === 'chunk') {
+        for (const s of iS) {
+          const t = iT.find(
+            (x) => x.member === s.member && x.chunk === s.chunk,
+          )
+          if (t)
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
         }
       } else {
         for (const s of iS) {

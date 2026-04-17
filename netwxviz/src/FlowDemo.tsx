@@ -460,7 +460,8 @@ export default function FlowDemo() {
           Each job’s <code>RUNNING</code> value (<code>once</code>,{' '}
           <code>date</code>, <code>member</code>, <code>chunk</code>,{' '}
           <code>split</code>) controls how many instances are drawn from these
-          three fields. Example: <code>chunk</code> → members × chunks;{' '}
+          three fields. Examples: <code>chunk</code> → members × chunks;{' '}
+          <code>split</code> → members × chunks × splits;{' '}
           <code>SIM-1</code> links chunk k to chunk k − 1 within the same member.
         </div>
       </div>
