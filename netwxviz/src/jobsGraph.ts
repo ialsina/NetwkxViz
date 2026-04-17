@@ -21,7 +21,10 @@ export type JobRow = {
 }
 
 export type DotNodeData = {
+  /** Base job name (first line). */
   label: string
+  /** Second line: member / chunk / (split), omitting non-repeated dimensions. */
+  labelLine2?: string
   color?: string
   isExtra?: boolean
   showLabel?: boolean
@@ -360,12 +363,69 @@ function effectiveMembers(p: DimensionParams): string[] {
 
 export type JobInstance = {
   id: string
-  label: string
   job: string
   running: RunningLevel
   member?: string
   chunk?: number
   split?: number
+}
+
+/**
+ * Line 1: job name. Line 2: only dimensions that repeat (&gt;1 instance) in the UI, e.g.
+ * `chunk (split)` with one member, or `member / chunk` when splits = 1.
+ */
+export function formatJobInstanceLines(
+  inst: JobInstance,
+  running: RunningLevel,
+  p: DimensionParams,
+): { line1: string; line2: string | null } {
+  const line1 = inst.job
+  const M = effectiveMembers(p)
+  const membCount = M.length
+  const C = Math.max(1, p.numChunks)
+  const S = Math.max(1, p.numSplits)
+
+  const showMember = membCount > 1 && inst.member != null && inst.member !== ''
+  const showChunk = C > 1 && inst.chunk != null
+  const showSplit = S > 1 && inst.split != null
+
+  if (running === 'once') return { line1, line2: null }
+
+  if (running === 'date' || running === 'member') {
+    return { line1, line2: showMember ? inst.member! : null }
+  }
+
+  if (running === 'chunk') {
+    const parts: string[] = []
+    if (showMember) parts.push(inst.member!)
+    if (showChunk) parts.push(String(inst.chunk!))
+    return { line1, line2: parts.length ? parts.join(' / ') : null }
+  }
+
+  if (running === 'split') {
+    if (!showMember && !showChunk && !showSplit) return { line1, line2: null }
+    if (showSplit) {
+      if (showMember && showChunk) {
+        return {
+          line1,
+          line2: `${inst.member} / ${inst.chunk} (${inst.split})`,
+        }
+      }
+      if (showMember && !showChunk) {
+        return { line1, line2: `${inst.member} / (${inst.split})` }
+      }
+      if (!showMember && showChunk) {
+        return { line1, line2: `${inst.chunk} (${inst.split})` }
+      }
+      return { line1, line2: `(${inst.split})` }
+    }
+    const parts: string[] = []
+    if (showMember) parts.push(inst.member!)
+    if (showChunk) parts.push(String(inst.chunk!))
+    return { line1, line2: parts.length ? parts.join(' / ') : null }
+  }
+
+  return { line1, line2: null }
 }
 
 export function buildInstancesForJob(
@@ -379,12 +439,11 @@ export function buildInstancesForJob(
 
   switch (running) {
     case 'once':
-      return [{ id: job, label: job, job, running }]
+      return [{ id: job, job, running }]
     case 'date':
     case 'member':
       return M.map((m) => ({
         id: `${job}@m:${encodeURIComponent(m)}`,
-        label: `${job} · ${m}`,
         job,
         member: m,
         running,
@@ -395,7 +454,6 @@ export function buildInstancesForJob(
         for (let c = 1; c <= C; c++) {
           out.push({
             id: `${job}|m:${encodeURIComponent(m)}|c:${c}`,
-            label: `${job} · ${m} · #${c}`,
             job,
             member: m,
             chunk: c,
@@ -413,7 +471,6 @@ export function buildInstancesForJob(
           for (let sp = 1; sp <= S; sp++) {
             out.push({
               id: `${job}|m:${encodeURIComponent(m)}|c:${c}|s:${sp}`,
-              label: `${job} · ${m} · #${c} · split ${sp}`,
               job,
               member: m,
               chunk: c,
@@ -426,7 +483,7 @@ export function buildInstancesForJob(
       return out
     }
     default:
-      return [{ id: job, label: job, job, running: 'once' }]
+      return [{ id: job, job, running: 'once' }]
   }
 }
 
@@ -687,13 +744,16 @@ export function buildExpandedGraphFromJobs(
     const inst = instancesByJob.get(job) ?? []
     const isExtra = !runningByJob.has(job)
     const baseColor = colorForJobName(job, isExtra)
+    const r = runningByJob.get(job) ?? 'once'
     for (const it of inst) {
+      const { line1, line2 } = formatJobInstanceLines(it, r, params)
       nodes.push({
         id: it.id,
         type: 'dot',
         position: { x: 0, y: 0 },
         data: {
-          label: it.label,
+          label: line1,
+          ...(line2 ? { labelLine2: line2 } : {}),
           color: baseColor,
           isExtra,
         },

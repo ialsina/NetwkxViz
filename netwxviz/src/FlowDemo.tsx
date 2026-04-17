@@ -44,6 +44,9 @@ type GraphConfig = {
 
 const DotNode = ({ data }: NodeProps<DotNodeType>) => {
   const showLabel = (data as unknown as { showLabel?: boolean }).showLabel
+  const line2 = data.labelLine2
+  const a11yLabel =
+    line2 != null && line2 !== '' ? `${data.label}\n${line2}` : data.label
 
   return (
     <div
@@ -55,8 +58,8 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
         background: data.color ?? 'var(--accent)',
         boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
       }}
-      title={data.label}
-      aria-label={data.label}
+      title={a11yLabel}
+      aria-label={a11yLabel}
     >
       <Handle
         type="target"
@@ -77,21 +80,42 @@ const DotNode = ({ data }: NodeProps<DotNodeType>) => {
             top: 22,
             transform: 'translateX(-50%)',
             pointerEvents: 'none',
-            padding: '2px 6px',
-            borderRadius: 999,
+            padding: '4px 8px',
+            borderRadius: 10,
             fontSize: 11,
             lineHeight: '14px',
             color: 'var(--text-h)',
             background: 'rgba(0,0,0,0.30)',
             border: '1px solid rgba(255,255,255,0.12)',
             backdropFilter: 'blur(6px)',
-            whiteSpace: 'nowrap',
-            maxWidth: 220,
+            maxWidth: 260,
             overflow: 'hidden',
-            textOverflow: 'ellipsis',
+            textAlign: 'center',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 2,
           }}
         >
-          {data.label}
+          <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+            {data.label}
+          </span>
+          {line2 != null && line2 !== '' ? (
+            <span
+              style={{
+                fontSize: 10,
+                lineHeight: '13px',
+                fontWeight: 500,
+                opacity: 0.92,
+                whiteSpace: 'nowrap',
+                maxWidth: '100%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {line2}
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>
