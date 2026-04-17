@@ -1,0 +1,30 @@
+[
+  {
+    "name": "BOOT",
+    "DEPENDENCIES": ""
+  },
+  {
+    "name": "FETCH",
+    "DEPENDENCIES": "BOOT"
+  },
+  {
+    "name": "MERGE",
+    "DEPENDENCIES": "{\"BOOT\": null, \"FETCH\": null}"
+  },
+  {
+    "name": "ATMOS",
+    "DEPENDENCIES": "MERGE"
+  },
+  {
+    "name": "OCEAN",
+    "DEPENDENCIES": "MERGE"
+  },
+  {
+    "name": "SIM",
+    "DEPENDENCIES": "ATMOS+1 OCEAN+2 ATMOS+1"
+  },
+  {
+    "name": "ARCHIVE",
+    "DEPENDENCIES": "EXTERNAL_BUCKET"
+  }
+]
