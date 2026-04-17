@@ -51,8 +51,8 @@ function legendColorByHeading(mode: NodeColorMode): string {
   switch (mode) {
     case 'name':
       return 'job name'
-    case 'running':
-      return 'RUNNING level'
+    case 'frequency':
+      return 'frequency'
     case 'platform':
       return 'PLATFORM'
     case 'member':
@@ -552,7 +552,7 @@ export default function FlowDemo() {
               }
             >
               <option value="name">Job name</option>
-              <option value="running">RUNNING</option>
+              <option value="frequency">Frequency</option>
               <option value="platform">Platform</option>
               <option value="member">Member</option>
               <option value="chunk">Chunk</option>
@@ -690,12 +690,14 @@ export default function FlowDemo() {
           </div>
         </div>
         <div className="flow-dim-help">
-          Each job’s <code>RUNNING</code> value (<code>once</code>,{' '}
-          <code>date</code>, <code>member</code>, <code>chunk</code>,{' '}
-          <code>split</code>) controls how many instances are drawn from these
-          three fields. Examples: <code>chunk</code> → members × chunks;{' '}
-          <code>split</code> → members × chunks × splits;{' '}
-          <code>SIM-1</code> links chunk k to chunk k − 1 within the same member.
+          Each job’s <code>RUNNING</code> (<code>once</code> … <code>split</code>)
+          sets its base repetition level. A non-empty <code>SPLITS</code> value adds
+          job-split parts per Autosubmit “Job split” (numeric count or{' '}
+          <code>auto</code> uses SPLITS here). Examples: <code>chunk</code> → members
+          × chunks; <code>chunk</code> + <code>SPLITS</code> → multiply each chunk
+          task by that split count; <code>RUNNING: split</code> uses the SPLITS
+          field here for the finest index. <code>SIM-1</code> links chunk k to k − 1
+          within the same member (split indices align when both sides carry them).
         </div>
       </div>
 

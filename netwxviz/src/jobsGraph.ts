@@ -6,6 +6,8 @@ import { Position, type Edge, type Node } from '@xyflow/react'
  * - Each listed dependency must **finish before** the current job is submitted.
  * - A token like `SIM-1` means the **previous chunk** of job `SIM` (same job family, not a separate job name).
  * - Plain tokens (no `±N` suffix) refer to that job’s completion at the matching running level.
+ * - Per-job **SPLITS** (Autosubmit “Job split”) subdivides each task at that job’s `RUNNING` level; expanded
+ *   edges align split indices when both sides carry them, and allow 1-to-N when the coarse side has no split.
  *
  * This file only builds a **flat** graph: chunk/member/date dimensions are not expanded; edges carry
  * metadata so `SIM-1` vs `SIM` stay distinguishable (including self-edges `SIM → SIM` for chunk chains).
@@ -13,10 +15,23 @@ import { Position, type Edge, type Node } from '@xyflow/react'
  * @see https://autosubmit.readthedocs.io/en/master/userguide/defining_workflows/index.html
  */
 
+/** Autosubmit `RUNNING` level from job YAML (`once` … `split`). */
+export type RunningLevel = 'once' | 'date' | 'member' | 'chunk' | 'split'
+
+/**
+ * Effective repetition granularity for coloring: same as {@link RunningLevel} unless the
+ * job sets `SPLITS` (non-empty), then `SPLIT` (job split parts; Autosubmit “Job split”).
+ */
+export type FrequencyLevel = RunningLevel | 'SPLIT'
+
 /** One row from `jobs.json`: at least `name` and `DEPENDENCIES`. */
 export type JobRow = {
   name: string
   DEPENDENCIES: string
+  /**
+   * Set by {@link parseJobsFileJson}: normalized `RUNNING`, or `SPLIT` when {@link jobSplitsAttributeIsSet}.
+   */
+  frequency?: FrequencyLevel
   [key: string]: unknown
 }
 
@@ -272,17 +287,27 @@ const DEFAULT_COLOR_SAMPLER: GraphColorSampler = {
 }
 
 /** What to base node dot colors on in the expanded graph. */
-export type NodeColorMode = 'name' | 'running' | 'platform' | 'member' | 'chunk'
+export type NodeColorMode = 'name' | 'frequency' | 'platform' | 'member' | 'chunk'
+
+/**
+ * Fixed hues for Color by frequency. `chunk` vs YAML `split` were too close when hashed;
+ * `SPLIT` (from `SPLITS`) gets its own slot vs `split` (from `RUNNING: split`).
+ */
+const FREQUENCY_LEVEL_HUES: Record<FrequencyLevel, number> = {
+  once: 218,
+  date: 48,
+  member: 292,
+  chunk: 132,
+  split: 18,
+  SPLIT: 328,
+}
 
 function hslFromKey(key: string, sampler: GraphColorSampler): string {
   return `hsl(${hashHue(key)} ${sampler.nodeSaturation} ${sampler.nodeLightness})`
 }
 
 /**
- * Picks a stable color for an expanded node instance. Extra dependency-only nodes stay neutral gray.
- */
-/**
- * Stable legend row for expanded nodes: same string ordering as {@link colorForExpandedNode}’s hash input.
+ * Stable legend row for expanded nodes: same keys as {@link colorForExpandedNode}.
  * Returns `null` for dependency-only (“extra”) nodes that are always gray.
  */
 export function colorLegendKeyAndLabel(
@@ -291,6 +316,7 @@ export function colorLegendKeyAndLabel(
     job: string
     isExtra: boolean
     running: RunningLevel
+    frequency: FrequencyLevel
     platform: string
     member?: string
     chunk?: number
@@ -300,8 +326,14 @@ export function colorLegendKeyAndLabel(
   switch (mode) {
     case 'name':
       return { key: ctx.job, label: ctx.job }
-    case 'running':
-      return { key: ctx.running, label: `RUNNING: ${ctx.running}` }
+    case 'frequency':
+      return {
+        key: ctx.frequency,
+        label:
+          ctx.frequency === 'SPLIT'
+            ? 'frequency: SPLIT'
+            : `frequency: ${ctx.frequency}`,
+      }
     case 'platform': {
       const p = ctx.platform.trim() || '(unset)'
       return {
@@ -328,12 +360,16 @@ export function colorLegendKeyAndLabel(
   }
 }
 
+/**
+ * Picks a stable color for an expanded node instance. Extra dependency-only nodes stay neutral gray.
+ */
 export function colorForExpandedNode(
   mode: NodeColorMode,
   ctx: {
     job: string
     isExtra: boolean
     running: RunningLevel
+    frequency: FrequencyLevel
     platform: string
     member?: string
     chunk?: number
@@ -344,8 +380,8 @@ export function colorForExpandedNode(
   switch (mode) {
     case 'name':
       return hslFromKey(ctx.job, sampler)
-    case 'running':
-      return hslFromKey(ctx.running, sampler)
+    case 'frequency':
+      return `hsl(${FREQUENCY_LEVEL_HUES[ctx.frequency]} ${sampler.nodeSaturation} ${sampler.nodeLightness})`
     case 'platform': {
       const p = ctx.platform.trim() || '(unset)'
       return hslFromKey(p, sampler)
@@ -408,18 +444,18 @@ export function collectExpandedColorLegendEntries(
       if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb
       return a.key.localeCompare(b.key)
     })
-  } else if (colorMode === 'running') {
-    const order: Record<RunningLevel, number> = {
+  } else if (colorMode === 'frequency') {
+    const order: Record<string, number> = {
       once: 0,
       date: 1,
       member: 2,
       chunk: 3,
       split: 4,
+      SPLIT: 5,
     }
     arr.sort(
       (a, b) =>
-        (order[a.key as RunningLevel] ?? 99) -
-          (order[b.key as RunningLevel] ?? 99) ||
+        (order[a.key] ?? 99) - (order[b.key] ?? 99) ||
         a.key.localeCompare(b.key),
     )
   } else {
@@ -713,11 +749,11 @@ export function parseJobsFileJson(text: string): JobRow[] {
   if (!Array.isArray(data)) {
     throw new Error('Expected a JSON array of job objects')
   }
-  return data as JobRow[]
+  return (data as JobRow[]).map((row) => ({
+    ...row,
+    frequency: deriveJobFrequency(row),
+  }))
 }
-
-/** Autosubmit RUNNING levels (see `RUNNING` in job definitions). */
-export type RunningLevel = 'once' | 'date' | 'member' | 'chunk' | 'split'
 
 /** Finer levels have higher numbers (Autosubmit: once → … → chunk/split). */
 const RUNNING_ORDER: Record<RunningLevel, number> = {
@@ -739,6 +775,70 @@ export function normalizeRunning(raw: unknown): RunningLevel {
   if (s === 'chunk') return 'chunk'
   if (s === 'split') return 'split'
   return 'once'
+}
+
+/**
+ * True when `SPLITS` requests job-split parts (Autosubmit “Job split”): non-empty, not a lone
+ * `1` (single part = no extra granularity), including `auto` and counts &gt; 1.
+ */
+export function jobSplitsAttributeIsSet(row: JobRow): boolean {
+  const v = row.SPLITS
+  if (v == null) return false
+  const s = String(v).trim()
+  if (!s) return false
+  if (s.toLowerCase() === 'auto') return true
+  const n = Number(s)
+  if (Number.isFinite(n)) return n > 1
+  return true
+}
+
+/**
+ * `RUNNING` normalized to a level, or `SPLIT` when `SPLITS` is set (job split parts).
+ */
+export function deriveJobFrequency(row: JobRow): FrequencyLevel {
+  if (jobSplitsAttributeIsSet(row)) return 'SPLIT'
+  return normalizeRunning(row.RUNNING)
+}
+
+/**
+ * Number of job-split parts for expansion (`SPLITS` / `auto` uses UI `numSplits`).
+ */
+export function splitStepsForJob(
+  row: JobRow | undefined,
+  p: DimensionParams,
+): number {
+  if (!row) return 1
+  const raw = row.SPLITS
+  if (raw == null) return 1
+  const str = String(raw).trim()
+  if (!str) return 1
+  if (str.toLowerCase() === 'auto') return Math.max(1, p.numSplits)
+  const n = Number(str)
+  if (Number.isFinite(n) && n >= 1) return Math.floor(n)
+  return Math.max(1, p.numSplits)
+}
+
+function splitSubdivisions(
+  running: RunningLevel,
+  row: JobRow | undefined,
+  p: DimensionParams,
+): number {
+  const fromAttr = splitStepsForJob(row, p)
+  if (running === 'split') {
+    return Math.max(1, p.numSplits, fromAttr > 1 ? fromAttr : 1)
+  }
+  return Math.max(1, fromAttr)
+}
+
+/**
+ * Autosubmit-style instance linking across job-split parts: 1-to-N when the coarse side
+ * has no split index; 1-to-1 when both sides carry a split index.
+ */
+function splitEdgesAlign(a?: number, b?: number): boolean {
+  if (a != null && b != null) return a === b
+  if (a == null && b == null) return true
+  if (a == null && b != null) return true
+  return false
 }
 
 function runningOrder(r: RunningLevel): number {
@@ -781,33 +881,60 @@ export function formatJobInstanceLines(
   inst: JobInstance,
   running: RunningLevel,
   p: DimensionParams,
+  row?: JobRow,
 ): { line1: string; line2: string | null } {
   const line1 = inst.job
   const M = effectiveMembers(p)
   const membCount = M.length
   const C = Math.max(1, p.numChunks)
-  const S = Math.max(1, p.numSplits)
+  const SpOnce = running === 'once' ? splitSubdivisions('once', row, p) : 1
+  const SpMem =
+    running === 'member' || running === 'date'
+      ? splitSubdivisions(running, row, p)
+      : 1
+  const SpChunk = running === 'chunk' ? splitSubdivisions('chunk', row, p) : 1
+  const SpRunSplit = running === 'split' ? splitSubdivisions('split', row, p) : 1
 
   const showMember = membCount > 1 && inst.member != null && inst.member !== ''
   const showChunk = C > 1 && inst.chunk != null
-  const showSplit = S > 1 && inst.split != null
+  const showSplitRun = SpRunSplit > 1 && inst.split != null
+  const showSplitChunk = SpChunk > 1 && inst.split != null
+  const showSplitMem =
+    (running === 'member' || running === 'date') &&
+    SpMem > 1 &&
+    inst.split != null
+  const showSplitOnce = SpOnce > 1 && inst.split != null
 
-  if (running === 'once') return { line1, line2: null }
+  if (running === 'once') {
+    if (showSplitOnce) return { line1, line2: `(${inst.split})` }
+    return { line1, line2: null }
+  }
 
   if (running === 'date' || running === 'member') {
-    return { line1, line2: showMember ? inst.member! : null }
+    if (showMember && showSplitMem) {
+      return { line1, line2: `${inst.member!} (${inst.split})` }
+    }
+    if (showMember) return { line1, line2: inst.member! }
+    if (showSplitMem) return { line1, line2: `(${inst.split})` }
+    return { line1, line2: null }
   }
 
   if (running === 'chunk') {
     const parts: string[] = []
     if (showMember) parts.push(inst.member!)
     if (showChunk) parts.push(String(inst.chunk!))
+    if (showSplitChunk) {
+      if (parts.length) {
+        return { line1, line2: `${parts.join(' / ')} (${inst.split})` }
+      }
+      return { line1, line2: `(${inst.split})` }
+    }
     return { line1, line2: parts.length ? parts.join(' / ') : null }
   }
 
   if (running === 'split') {
-    if (!showMember && !showChunk && !showSplit) return { line1, line2: null }
-    if (showSplit) {
+    if (!showMember && !showChunk && !showSplitRun) return { line1, line2: null }
+    if (showSplitRun) {
       if (showMember && showChunk) {
         return {
           line1,
@@ -835,43 +962,87 @@ export function buildInstancesForJob(
   job: string,
   running: RunningLevel,
   p: DimensionParams,
+  row?: JobRow,
 ): JobInstance[] {
   const M = effectiveMembers(p)
   const C = Math.max(1, p.numChunks)
-  const S = Math.max(1, p.numSplits)
 
   switch (running) {
-    case 'once':
-      return [{ id: job, job, running }]
+    case 'once': {
+      const Sp = splitSubdivisions('once', row, p)
+      if (Sp <= 1) return [{ id: job, job, running }]
+      const out: JobInstance[] = []
+      for (let sp = 1; sp <= Sp; sp++) {
+        out.push({
+          id: `${job}|s:${sp}`,
+          job,
+          running,
+          split: sp,
+        })
+      }
+      return out
+    }
     case 'date':
-    case 'member':
-      return M.map((m) => ({
-        id: `${job}@m:${encodeURIComponent(m)}`,
-        job,
-        member: m,
-        running,
-      }))
+    case 'member': {
+      const Sp = splitSubdivisions(running, row, p)
+      const out: JobInstance[] = []
+      for (const m of M) {
+        if (Sp <= 1) {
+          out.push({
+            id: `${job}@m:${encodeURIComponent(m)}`,
+            job,
+            member: m,
+            running,
+          })
+        } else {
+          for (let sp = 1; sp <= Sp; sp++) {
+            out.push({
+              id: `${job}@m:${encodeURIComponent(m)}|s:${sp}`,
+              job,
+              member: m,
+              running,
+              split: sp,
+            })
+          }
+        }
+      }
+      return out
+    }
     case 'chunk': {
+      const Sp = splitSubdivisions('chunk', row, p)
       const out: JobInstance[] = []
       for (const m of M) {
         for (let c = 1; c <= C; c++) {
-          out.push({
-            id: `${job}|m:${encodeURIComponent(m)}|c:${c}`,
-            job,
-            member: m,
-            chunk: c,
-            running,
-          })
+          if (Sp <= 1) {
+            out.push({
+              id: `${job}|m:${encodeURIComponent(m)}|c:${c}`,
+              job,
+              member: m,
+              chunk: c,
+              running,
+            })
+          } else {
+            for (let sp = 1; sp <= Sp; sp++) {
+              out.push({
+                id: `${job}|m:${encodeURIComponent(m)}|c:${c}|s:${sp}`,
+                job,
+                member: m,
+                chunk: c,
+                running,
+                split: sp,
+              })
+            }
+          }
         }
       }
       return out
     }
     case 'split': {
-      // Split is the finest level: instances repeat per (member, chunk, split index).
+      const Sp = splitSubdivisions('split', row, p)
       const out: JobInstance[] = []
       for (const m of M) {
         for (let c = 1; c <= C; c++) {
-          for (let sp = 1; sp <= S; sp++) {
+          for (let sp = 1; sp <= Sp; sp++) {
             out.push({
               id: `${job}|m:${encodeURIComponent(m)}|c:${c}|s:${sp}`,
               job,
@@ -898,8 +1069,8 @@ export type ExpandedGraphOptions = {
 }
 
 /**
- * Expands the flat dependency graph using each job’s `RUNNING` value and the given
- * member / chunk / split counts (Autosubmit-style: once &lt; date/member &lt; chunk &lt; split).
+ * Expands the flat dependency graph using each job’s `RUNNING`, optional per-job `SPLITS`
+ * (job split parts per Autosubmit “Job split”), and the given member / chunk / split counts.
  */
 export function buildExpandedGraphFromJobs(
   rows: JobRow[],
@@ -910,12 +1081,19 @@ export function buildExpandedGraphFromJobs(
   const colorSampler: GraphColorSampler =
     options?.colorPalette ?? DEFAULT_COLOR_SAMPLER
   const flat = buildGraphFromJobs(rows)
+  const rowByJob = new Map<string, JobRow>()
   const runningByJob = new Map<string, RunningLevel>()
+  const frequencyByJob = new Map<string, FrequencyLevel>()
   const platformByJob = new Map<string, string>()
   for (const row of rows) {
     const name = String(row.name ?? '').trim()
     if (name) {
+      rowByJob.set(name, row)
       runningByJob.set(name, normalizeRunning(row.RUNNING))
+      frequencyByJob.set(
+        name,
+        row.frequency ?? deriveJobFrequency(row),
+      )
       platformByJob.set(name, String(row.PLATFORM ?? ''))
     }
   }
@@ -928,7 +1106,8 @@ export function buildExpandedGraphFromJobs(
 
   for (const job of allJobIds) {
     const r = runningByJob.get(job) ?? 'once'
-    instancesByJob.set(job, buildInstancesForJob(job, r, params))
+    const row = rowByJob.get(job)
+    instancesByJob.set(job, buildInstancesForJob(job, r, params, row))
   }
 
   const expandedEdges: Edge<JobEdgeData>[] = []
@@ -958,14 +1137,19 @@ export function buildExpandedGraphFromJobs(
     ) {
       for (const m of effectiveMembers(params)) {
         for (let c = 2; c <= Math.max(1, params.numChunks); c++) {
-          const idFrom = `${S}|m:${encodeURIComponent(m)}|c:${c - 1}`
-          const idTo = `${T}|m:${encodeURIComponent(m)}|c:${c}`
-          addEdge({
-            id: `exp-${idFrom}->${idTo}`,
-            source: idFrom,
-            target: idTo,
-            data,
-          })
+          for (const a of iS) {
+            if (a.member !== m || a.chunk !== c - 1) continue
+            for (const b of iT) {
+              if (b.member !== m || b.chunk !== c) continue
+              if (!splitEdgesAlign(a.split, b.split)) continue
+              addEdge({
+                id: `exp-${a.id}->${b.id}-${e.id}`,
+                source: a.id,
+                target: b.id,
+                data,
+              })
+            }
+          }
         }
       }
       continue
@@ -980,52 +1164,60 @@ export function buildExpandedGraphFromJobs(
 
     if (oS === oT) {
       if (rS === 'once') {
-        if (iS[0] && iT[0])
-          addEdge({
-            id: `exp-${iS[0].id}->${iT[0].id}-${e.id}`,
-            source: iS[0].id,
-            target: iT[0].id,
-            data,
-          })
-      } else if (rS === 'member' || rS === 'date') {
         for (const a of iS) {
-          const b = iT.find((t) => t.member === a.member)
-          if (b)
+          for (const b of iT) {
+            if (!splitEdgesAlign(a.split, b.split)) continue
             addEdge({
               id: `exp-${a.id}->${b.id}-${e.id}`,
               source: a.id,
               target: b.id,
               data,
             })
+          }
+        }
+      } else if (rS === 'member' || rS === 'date') {
+        for (const a of iS) {
+          for (const b of iT) {
+            if (b.member !== a.member) continue
+            if (!splitEdgesAlign(a.split, b.split)) continue
+            addEdge({
+              id: `exp-${a.id}->${b.id}-${e.id}`,
+              source: a.id,
+              target: b.id,
+              data,
+            })
+          }
         }
       } else if (rS === 'chunk') {
         for (const a of iS) {
-          const b = iT.find(
-            (t) => t.member === a.member && t.chunk === a.chunk,
-          )
-          if (b)
+          for (const b of iT) {
+            if (b.member !== a.member || b.chunk !== a.chunk) continue
+            if (!splitEdgesAlign(a.split, b.split)) continue
             addEdge({
               id: `exp-${a.id}->${b.id}-${e.id}`,
               source: a.id,
               target: b.id,
               data,
             })
+          }
         }
       } else if (rS === 'split') {
         for (const a of iS) {
-          const b = iT.find(
-            (t) =>
-              t.member === a.member &&
-              t.chunk === a.chunk &&
-              t.split === a.split,
-          )
-          if (b)
+          for (const b of iT) {
+            if (
+              b.member !== a.member ||
+              b.chunk !== a.chunk ||
+              !splitEdgesAlign(a.split, b.split)
+            ) {
+              continue
+            }
             addEdge({
               id: `exp-${a.id}->${b.id}-${e.id}`,
               source: a.id,
               target: b.id,
               data,
             })
+          }
         }
       }
       continue
@@ -1033,50 +1225,57 @@ export function buildExpandedGraphFromJobs(
 
     if (oS < oT) {
       if (rS === 'once') {
-        for (const t of iT) {
-          addEdge({
-            id: `exp-${iS[0].id}->${t.id}-${e.id}`,
-            source: iS[0].id,
-            target: t.id,
-            data,
-          })
-        }
-      } else if ((rS === 'member' || rS === 'date') && rT === 'chunk') {
-        for (const t of iT) {
-          const s = iS.find((x) => x.member === t.member)
-          if (s)
+        for (const s of iS) {
+          for (const t of iT) {
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
               target: t.id,
               data,
             })
+          }
+        }
+      } else if ((rS === 'member' || rS === 'date') && rT === 'chunk') {
+        for (const t of iT) {
+          for (const s of iS) {
+            if (s.member !== t.member) continue
+            if (!splitEdgesAlign(s.split, t.split)) continue
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+          }
         }
       } else if (
         (rS === 'member' || rS === 'date') &&
         (rT === 'member' || rT === 'date')
       ) {
         for (const t of iT) {
-          const s = iS.find((x) => x.member === t.member)
-          if (s)
+          for (const s of iS) {
+            if (s.member !== t.member) continue
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
               target: t.id,
               data,
             })
+          }
         }
       } else if (rS === 'chunk' && rT === 'split') {
         for (const s of iS) {
           for (const t of iT) {
-            if (t.member === s.member && t.chunk === s.chunk) {
-              addEdge({
-                id: `exp-${s.id}->${t.id}-${e.id}`,
-                source: s.id,
-                target: t.id,
-                data,
-              })
-            }
+            if (t.member !== s.member || t.chunk !== s.chunk) continue
+            if (!splitEdgesAlign(s.split, t.split)) continue
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
           }
         }
       } else if (
@@ -1084,18 +1283,21 @@ export function buildExpandedGraphFromJobs(
         rT === 'split'
       ) {
         for (const t of iT) {
-          const s = iS.find((x) => x.member === t.member)
-          if (s)
+          for (const s of iS) {
+            if (s.member !== t.member) continue
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
               target: t.id,
               data,
             })
+          }
         }
       } else {
         for (const s of iS) {
           for (const t of iT) {
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
@@ -1111,16 +1313,20 @@ export function buildExpandedGraphFromJobs(
     if (oS > oT) {
       if (rT === 'once') {
         for (const s of iS) {
-          addEdge({
-            id: `exp-${s.id}->${iT[0].id}-${e.id}`,
-            source: s.id,
-            target: iT[0].id,
-            data,
-          })
+          for (const t of iT) {
+            if (!splitEdgesAlign(s.split, t.split)) continue
+            addEdge({
+              id: `exp-${s.id}->${t.id}-${e.id}`,
+              source: s.id,
+              target: t.id,
+              data,
+            })
+          }
         }
       } else if (rS === 'chunk' && rT === 'member') {
         for (const t of iT) {
           for (const s of iS.filter((x) => x.member === t.member)) {
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
@@ -1131,20 +1337,21 @@ export function buildExpandedGraphFromJobs(
         }
       } else if (rS === 'split' && rT === 'chunk') {
         for (const s of iS) {
-          const t = iT.find(
-            (x) => x.member === s.member && x.chunk === s.chunk,
-          )
-          if (t)
+          for (const t of iT) {
+            if (t.member !== s.member || t.chunk !== s.chunk) continue
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
               target: t.id,
               data,
             })
+          }
         }
       } else {
         for (const s of iS) {
           for (const t of iT) {
+            if (!splitEdgesAlign(s.split, t.split)) continue
             addEdge({
               id: `exp-${s.id}->${t.id}-${e.id}`,
               source: s.id,
@@ -1162,13 +1369,16 @@ export function buildExpandedGraphFromJobs(
     const inst = instancesByJob.get(job) ?? []
     const isExtra = !runningByJob.has(job)
     const r = runningByJob.get(job) ?? 'once'
+    const freq = frequencyByJob.get(job) ?? 'once'
     const platform = platformByJob.get(job) ?? ''
+    const row = rowByJob.get(job)
     for (const it of inst) {
-      const { line1, line2 } = formatJobInstanceLines(it, r, params)
+      const { line1, line2 } = formatJobInstanceLines(it, r, params, row)
       const colorCtx = {
         job,
         isExtra,
         running: r,
+        frequency: freq,
         platform,
         member: it.member,
         chunk: it.chunk,
