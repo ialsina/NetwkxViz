@@ -214,16 +214,15 @@ export default function FlowDemo() {
 
   return (
     <div
+      className="flow-demo"
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '72svh',
-        width: 'min(1100px, 100%)',
-        margin: '32px auto',
-        border: '1px solid var(--border)',
-        borderRadius: 12,
+        flex: 1,
+        minHeight: 0,
+        width: '100%',
+        height: '100%',
         overflow: 'hidden',
-        boxShadow: 'var(--shadow)',
         background:
           'radial-gradient(1400px 520px at 30% 0%, rgba(139,92,246,0.18), rgba(0,0,0,0))',
       }}
