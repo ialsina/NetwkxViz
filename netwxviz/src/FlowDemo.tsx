@@ -22,6 +22,7 @@ import {
   buildGraphFromJobs,
   layoutWithDagre,
   parseJobsFileJson,
+  type JobEdgeData,
   type JobRow,
 } from './jobsGraph'
 
@@ -121,13 +122,24 @@ export default function FlowDemo() {
         showLabel: showJobNames,
       },
     }))
-    const styledEdges: Edge[] = built.edges.map((e) => ({
-      ...e,
-      type: config.curvature,
-      animated: config.edgeAnimated,
-      markerEnd: { type: MarkerType.ArrowClosed, color: config.edgeColor },
-      style: { stroke: config.edgeColor, strokeWidth: config.edgeWidth },
-    }))
+    const styledEdges: Edge<JobEdgeData>[] = built.edges.map((e) => {
+      const d = e.data
+      const suffix = d?.dependencySuffix
+      return {
+        ...e,
+        type: config.curvature,
+        animated: config.edgeAnimated,
+        markerEnd: { type: MarkerType.ArrowClosed, color: config.edgeColor },
+        style: { stroke: config.edgeColor, strokeWidth: config.edgeWidth },
+        ...(suffix
+          ? {
+              label: suffix,
+              labelStyle: { fontSize: 10, fill: 'var(--text-h)' },
+              labelBgStyle: { fill: 'rgba(0,0,0,0.35)' },
+            }
+          : {}),
+      }
+    })
     return { nodes: laidOut, edges: styledEdges }
   }, [
     jobRows,

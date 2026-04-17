@@ -1,6 +1,18 @@
 import dagre from 'dagre'
 import type { Edge, Node } from '@xyflow/react'
 
+/**
+ * Dependency semantics follow Autosubmit’s workflow model (see “Defining the workflow”):
+ * - Each listed dependency must **finish before** the current job is submitted.
+ * - A token like `SIM-1` means the **previous chunk** of job `SIM` (same job family, not a separate job name).
+ * - Plain tokens (no `±N` suffix) refer to that job’s completion at the matching running level.
+ *
+ * This file only builds a **flat** graph: chunk/member/date dimensions are not expanded; edges carry
+ * metadata so `SIM-1` vs `SIM` stay distinguishable (including self-edges `SIM → SIM` for chunk chains).
+ *
+ * @see https://autosubmit.readthedocs.io/en/master/userguide/defining_workflows/index.html
+ */
+
 /** One row from `jobs.json`: at least `name` and `DEPENDENCIES`. */
 export type JobRow = {
   name: string
@@ -17,6 +29,14 @@ export type DotNodeData = {
 
 export type DotNodeType = Node<DotNodeData, 'dot'>
 
+/** How this dependency reference maps to Autosubmit’s workflow concepts. */
+export type AutosubmitDependencyKind =
+  | 'plain'
+  /** e.g. `SIM-1` → previous chunk of `SIM` (see Autosubmit “Dependencies with previous jobs”). */
+  | 'previous_chunk'
+  /** e.g. `SIM+3` → numeric `+N` suffix (offset / shorthand; not the same as YAML `DELAY:` on a job). */
+  | 'forward_offset'
+
 /** Extra fields on edges for dependency resolution (suffix split from base job name). */
 export type JobEdgeData = {
   /** Original token or key as it appeared in `DEPENDENCIES`. */
@@ -25,13 +45,21 @@ export type JobEdgeData = {
   dependencyBase: string
   /** Trailing variant only, e.g. `-1`, `+3`, or `null` if none. */
   dependencySuffix: string | null
+  /** Autosubmit-oriented interpretation of `dependencySuffix`. */
+  autosubmitKind: AutosubmitDependencyKind
+  /**
+   * For `previous_chunk`: negative integer (e.g. -1 for `-1`).
+   * For `forward_offset`: positive integer (e.g. 3 for `+3`).
+   * For `plain`: `null`.
+   */
+  relativeChunkOffset: number | null
 }
 
 /**
- * Splits a dependency token into base name and optional numeric suffix:
- * `SIM+3` → base `SIM`, suffix `+3`
- * `SIM-1` → base `SIM`, suffix `-1`
- * `SIM` → base `SIM`, suffix `null`
+ * Splits a dependency token into base job name and optional numeric suffix (Autosubmit-style):
+ * - `SIM-1` → base `SIM`, suffix `-1` (**previous chunk** of `SIM`)
+ * - `SIM+3` → base `SIM`, suffix `+3` (forward / numeric offset; distinct from YAML `DELAY:`)
+ * - `SIM` → base `SIM`, suffix `null`
  *
  * `+N` is matched before `-N` so tokens like `X+12` are unambiguous.
  */
@@ -62,6 +90,30 @@ export function parseDepToken(raw: string): {
   return { raw: rawTrim, base, suffix }
 }
 
+/** Maps parsed suffix to Autosubmit-style kind and numeric offset (chunk-relative when applicable). */
+export function autosubmitMetaFromSuffix(
+  suffix: string | null,
+): Pick<JobEdgeData, 'autosubmitKind' | 'relativeChunkOffset'> {
+  if (suffix == null) {
+    return { autosubmitKind: 'plain', relativeChunkOffset: null }
+  }
+  const plus = suffix.match(/^\+(\d+)$/)
+  if (plus) {
+    return {
+      autosubmitKind: 'forward_offset',
+      relativeChunkOffset: Number(plus[1]),
+    }
+  }
+  const minus = suffix.match(/^-(\d+)$/)
+  if (minus) {
+    return {
+      autosubmitKind: 'previous_chunk',
+      relativeChunkOffset: -Number(minus[1]),
+    }
+  }
+  return { autosubmitKind: 'plain', relativeChunkOffset: null }
+}
+
 /** Returns only the canonical base name (for backwards compatibility). */
 export function normalizeDepToken(token: string): string {
   return parseDepToken(token).base
@@ -89,6 +141,7 @@ export function parseDependencyRefs(
         return Object.keys(obj)
           .map((k) => k.trim())
           .filter(Boolean)
+          .filter((k) => k !== '?')
           .map(parseDepToken)
           .filter((p) => p.base)
       }
@@ -100,6 +153,7 @@ export function parseDependencyRefs(
 
   return s
     .split(/\s+/)
+    .filter((tok) => tok !== '?')
     .map(parseDepToken)
     .filter((p) => p.base)
 }
@@ -134,7 +188,8 @@ export type JobsGraphResult = {
 
 /**
  * Builds React Flow nodes and edges from jobs data.
- * Edge direction: dependency → dependent (`dep` must finish before `job`).
+ * Edge direction: **dependency completes → then dependent** (Autosubmit: jobs listed in `DEPENDENCIES`
+ * must finish before the current job is submitted).
  */
 export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
   const parseErrors: string[] = []
@@ -159,18 +214,24 @@ export function buildGraphFromJobs(rows: JobRow[]): JobsGraphResult {
     const deps = parseDependencyRefs(row.DEPENDENCIES)
     for (const dep of deps) {
       const { base, suffix, raw } = dep
+      const { autosubmitKind, relativeChunkOffset } = autosubmitMetaFromSuffix(suffix)
       referencedDeps.add(base)
-      const key = `${base}|${jobName}`
+      // `SIM` and `SIM-1` are different prerequisites — dedupe by full raw token + target job.
+      const key = `${raw}|${jobName}`
       if (edgeKeys.has(key)) continue
       edgeKeys.add(key)
+      const safeId = `${base}|${suffix ?? ''}|${jobName}`
+        .replace(/[^a-zA-Z0-9_|.-]+/g, '_')
       edges.push({
-        id: `e-${base}->${jobName}`,
+        id: `e-${safeId}`,
         source: base,
         target: jobName,
         data: {
           dependencyRaw: raw,
           dependencyBase: base,
           dependencySuffix: suffix,
+          autosubmitKind,
+          relativeChunkOffset,
         },
       })
     }
