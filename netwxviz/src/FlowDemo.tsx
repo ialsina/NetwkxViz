@@ -168,10 +168,10 @@ function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
   return clone
 }
 
-async function elementToPngDataUrl(
-  el: HTMLElement,
-  opts?: { backgroundColor?: string; dpi?: number },
-) {
+type ExportFormat = 'png' | 'jpg' | 'svg'
+type ExportBackground = 'transparent' | 'white'
+
+function elementToSvgText(el: HTMLElement, opts?: { backgroundColor?: string }) {
   const rect = el.getBoundingClientRect()
   const width = Math.max(1, Math.round(rect.width))
   const height = Math.max(1, Math.round(rect.height))
@@ -180,12 +180,25 @@ async function elementToPngDataUrl(
   clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml')
 
   const serialized = new XMLSerializer().serializeToString(clone)
-  const bg = opts?.backgroundColor ? `<rect width="100%" height="100%" fill="${opts.backgroundColor}"/>` : ''
+  const bg = opts?.backgroundColor
+    ? `<rect width="100%" height="100%" fill="${opts.backgroundColor}"/>`
+    : ''
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
   ${bg}
   <foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject>
 </svg>`
+}
+
+async function elementToRasterBlob(
+  el: HTMLElement,
+  opts?: { backgroundColor?: string; dpi?: number; mimeType?: 'image/png' | 'image/jpeg'; quality?: number },
+) {
+  const rect = el.getBoundingClientRect()
+  const width = Math.max(1, Math.round(rect.width))
+  const height = Math.max(1, Math.round(rect.height))
+
+  const svg = elementToSvgText(el, { backgroundColor: opts?.backgroundColor })
 
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -206,7 +219,19 @@ async function elementToPngDataUrl(
     if (!ctx) throw new Error('Canvas not available')
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
     ctx.drawImage(img, 0, 0)
-    return canvas.toDataURL('image/png')
+    const mimeType = opts?.mimeType ?? 'image/png'
+    const quality = opts?.quality
+    const outBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => {
+          if (!b) reject(new Error(`Failed to encode ${mimeType}`))
+          else resolve(b)
+        },
+        mimeType,
+        quality,
+      )
+    })
+    return outBlob
   } finally {
     URL.revokeObjectURL(url)
   }
@@ -721,13 +746,19 @@ export default function FlowDemo() {
   const [inactiveNodeIds, setInactiveNodeIds] = useState<Set<string>>(() => new Set())
 
   const [exportDpi, setExportDpi] = useState(3)
+  const [exportDpiText, setExportDpiText] = useState(() => String(3))
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('png')
+  const [exportBackground, setExportBackground] = useState<ExportBackground>('white')
   const [mediaMode, setMediaMode] = useState<'none' | 'download' | 'animate'>('none')
   const [animStartFrame, setAnimStartFrame] = useState<AnimKeyframe | null>(null)
   const [animEndFrame, setAnimEndFrame] = useState<AnimKeyframe | null>(null)
   const [animCurve, setAnimCurve] = useState<AnimCurve>('ease-in-out')
   const [animDurationSec, setAnimDurationSec] = useState(5)
+  const [animDurationSecText, setAnimDurationSecText] = useState(() => String(5))
   const [animFps, setAnimFps] = useState(24)
+  const [animFpsText, setAnimFpsText] = useState(() => String(24))
   const [animDpi, setAnimDpi] = useState(2)
+  const [animDpiText, setAnimDpiText] = useState(() => String(2))
   const [animating, setAnimating] = useState(false)
   const [animProgress, setAnimProgress] = useState(0)
 
@@ -737,6 +768,22 @@ export default function FlowDemo() {
     setSelectedNodeIds(new Set())
     setInactiveNodeIds(new Set())
   }, [])
+
+  useEffect(() => {
+    setExportDpiText(String(exportDpi))
+  }, [exportDpi])
+
+  useEffect(() => {
+    setAnimDpiText(String(animDpi))
+  }, [animDpi])
+
+  useEffect(() => {
+    setAnimDurationSecText(String(animDurationSec))
+  }, [animDurationSec])
+
+  useEffect(() => {
+    setAnimFpsText(String(animFps))
+  }, [animFps])
 
   const dimensionParams = useMemo((): DimensionParams => {
     return {
@@ -977,7 +1024,7 @@ export default function FlowDemo() {
     setInactiveNodeIds(new Set())
   }, [])
 
-  const downloadPng = useCallback(async () => {
+  const downloadMedia = useCallback(async () => {
     if (jobRows === null || nodes.length === 0) return
     const root = flowCanvasRef.current
     const plottingArea =
@@ -999,24 +1046,55 @@ export default function FlowDemo() {
 
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 
-      const bg = getComputedStyle(document.documentElement)
-        .getPropertyValue('--bg')
-        .trim()
+      const backgroundColor =
+        exportBackground === 'white'
+          ? '#ffffff'
+          : undefined
 
-      const dataUrl = await elementToPngDataUrl(plottingArea, {
-        backgroundColor: bg !== '' ? bg : undefined,
-        dpi: exportDpi,
-      })
+      let outBlob: Blob
+      let ext: string
+      let mimeType: string
+
+      if (exportFormat === 'svg') {
+        const svg = elementToSvgText(plottingArea, { backgroundColor })
+        outBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+        ext = 'svg'
+        mimeType = 'image/svg+xml'
+      } else if (exportFormat === 'jpg') {
+        // JPEG does not support transparency; treat transparent as white.
+        outBlob = await elementToRasterBlob(plottingArea, {
+          backgroundColor: backgroundColor ?? '#ffffff',
+          dpi: Math.max(1, exportDpi || 1),
+          mimeType: 'image/jpeg',
+          quality: 0.92,
+        })
+        ext = 'jpg'
+        mimeType = 'image/jpeg'
+      } else {
+        outBlob = await elementToRasterBlob(plottingArea, {
+          backgroundColor,
+          dpi: Math.max(1, exportDpi || 1),
+          mimeType: 'image/png',
+        })
+        ext = 'png'
+        mimeType = 'image/png'
+      }
 
       const base =
         (fileLabel || 'workflow')
           .replace(/\s+\(.*\)\s*$/, '')
           .replace(/\.[^.]+$/, '') || 'workflow'
 
+      const url = URL.createObjectURL(outBlob)
       const a = document.createElement('a')
-      a.href = dataUrl
-      a.download = `${base}.png`
+      a.href = url
+      a.download = `${base}.${ext}`
+      a.type = mimeType
+      document.body.appendChild(a)
       a.click()
+      a.remove()
+      // Give the browser time to start the download before revoking.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } finally {
       // Restore selection after exporting (selection should not be captured in PNG).
       if (prevSelectedIds.size > 0) {
@@ -1029,7 +1107,15 @@ export default function FlowDemo() {
       setSelectedNodeIds(prevSelectedIds)
       setExportingPng(false)
     }
-  }, [exportDpi, fileLabel, jobRows, nodes, setNodes])
+  }, [
+    exportBackground,
+    exportDpi,
+    exportFormat,
+    fileLabel,
+    jobRows,
+    nodes,
+    setNodes,
+  ])
 
   const captureKeyframe = useCallback((): AnimKeyframe | null => {
     const vp = rfInstanceRef.current?.getViewport()
@@ -1129,8 +1215,11 @@ export default function FlowDemo() {
       const a = document.createElement('a')
       a.href = url
       a.download = `${base}-animation.gif`
+      document.body.appendChild(a)
       a.click()
-      URL.revokeObjectURL(url)
+      a.remove()
+      // Give the browser time to start the download before revoking.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } finally {
       // Restore viewport + node states to the end frame
       rfInstanceRef.current?.setViewport(animEndFrame.viewport)
@@ -1640,17 +1729,48 @@ export default function FlowDemo() {
           ) : mediaMode === 'download' ? (
             <>
               <div className="flow-media-field">
+                <span className="flow-media-label">Format</span>
+                <select
+                  className="flow-toolbar-select flow-media-select"
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                  aria-label="Export format"
+                >
+                  <option value="jpg">JPG</option>
+                  <option value="png">PNG</option>
+                  <option value="svg">SVG</option>
+                </select>
+              </div>
+              <div className="flow-media-field">
+                <span className="flow-media-label">Background</span>
+                <select
+                  className="flow-toolbar-select flow-media-select"
+                  value={exportBackground}
+                  onChange={(e) => setExportBackground(e.target.value as ExportBackground)}
+                  aria-label="Export background"
+                >
+                  <option value="white">White</option>
+                  <option value="transparent">Transparent</option>
+                </select>
+              </div>
+              <div className="flow-media-field">
                 <span className="flow-media-label">DPI</span>
                 <input
-                  type="number"
+                  type="text"
                   className="flow-media-input"
-                  min={1}
-                  max={999}
-                  step={1}
-                  value={exportDpi}
-                  onChange={(e) =>
-                    setExportDpi(Math.max(1, Math.min(999, Number(e.target.value))))
-                  }
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={exportDpiText}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (!/^\d*$/.test(v)) return
+                    setExportDpiText(v)
+                    if (v !== '') setExportDpi(Number(v))
+                  }}
+                  onBlur={() => {
+                    const n = Number(exportDpiText)
+                    setExportDpi(Math.max(1, Math.min(99999, Number.isFinite(n) ? n : exportDpi)))
+                  }}
                   title="Export pixel density multiplier (1–8)"
                   aria-label="Export DPI"
                 />
@@ -1658,9 +1778,9 @@ export default function FlowDemo() {
               <button
                 type="button"
                 className="flow-canvas-action-btn flow-canvas-action-btn--accent"
-                onClick={downloadPng}
-                disabled={exportingPng}
-                title="Download PNG"
+                onClick={downloadMedia}
+                disabled={jobRows === null || nodes.length === 0 || exportingPng || exportDpiText === ''}
+                title="Download"
               >
                 {exportingPng ? '…' : 'Go'}
               </button>
@@ -1717,13 +1837,21 @@ export default function FlowDemo() {
               <div className="flow-media-field">
                 <span className="flow-media-label">DPI</span>
                 <input
-                  type="number"
+                  type="text"
                   className="flow-media-input"
-                  min={1}
-                  max={999}
-                  step={1}
-                  value={animDpi}
-                  onChange={(e) => setAnimDpi(Math.max(1, Math.min(999, Number(e.target.value))))}
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={animDpiText}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (!/^\d*$/.test(v)) return
+                    setAnimDpiText(v)
+                    if (v !== '') setAnimDpi(Number(v))
+                  }}
+                  onBlur={() => {
+                    const n = Number(animDpiText)
+                    setAnimDpi(Math.max(1, Math.min(99999, Number.isFinite(n) ? n : animDpi)))
+                  }}
                   title="Animation frame pixel density"
                   aria-label="Animation DPI"
                 />
@@ -1731,15 +1859,23 @@ export default function FlowDemo() {
               <div className="flow-media-field">
                 <span className="flow-media-label">Duration</span>
                 <input
-                  type="number"
+                  type="text"
                   className="flow-media-input"
-                  min={1}
-                  max={999}
-                  step={1}
-                  value={animDurationSec}
-                  onChange={(e) =>
-                    setAnimDurationSec(Math.max(1, Math.min(999, Number(e.target.value))))
-                  }
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={animDurationSecText}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (!/^\d*$/.test(v)) return
+                    setAnimDurationSecText(v)
+                    if (v !== '') setAnimDurationSec(Number(v))
+                  }}
+                  onBlur={() => {
+                    const n = Number(animDurationSecText)
+                    setAnimDurationSec(
+                      Math.max(1, Math.min(99999, Number.isFinite(n) ? n : animDurationSec)),
+                    )
+                  }}
                   title="Animation duration in seconds"
                   aria-label="Animation duration (s)"
                 />
@@ -1747,15 +1883,21 @@ export default function FlowDemo() {
               <div className="flow-media-field">
                 <span className="flow-media-label">FPS</span>
                 <input
-                  type="number"
+                  type="text"
                   className="flow-media-input"
-                  min={1}
-                  max={999}
-                  step={1}
-                  value={animFps}
-                  onChange={(e) =>
-                    setAnimFps(Math.max(1, Math.min(999, Number(e.target.value))))
-                  }
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={animFpsText}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (!/^\d*$/.test(v)) return
+                    setAnimFpsText(v)
+                    if (v !== '') setAnimFps(Number(v))
+                  }}
+                  onBlur={() => {
+                    const n = Number(animFpsText)
+                    setAnimFps(Math.max(1, Math.min(99999, Number.isFinite(n) ? n : animFps)))
+                  }}
                   title="Frames per second"
                   aria-label="Animation FPS"
                 />
@@ -1765,7 +1907,14 @@ export default function FlowDemo() {
                 type="button"
                 className="flow-canvas-action-btn flow-canvas-action-btn--accent"
                 onClick={runAnimation}
-                disabled={!animStartFrame || !animEndFrame || animating}
+                disabled={
+                  !animStartFrame ||
+                  !animEndFrame ||
+                  animating ||
+                  animDpiText === '' ||
+                  animDurationSecText === '' ||
+                  animFpsText === ''
+                }
                 title={
                   !animStartFrame || !animEndFrame
                     ? 'Set both start and end frames first'
