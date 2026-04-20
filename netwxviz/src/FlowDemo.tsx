@@ -603,9 +603,9 @@ function renderAnimFrame(
   // mirroring exactly what the node renderer does.
   for (const edge of data.edges) {
     const ip = Math.max(getInactiveP(edge.source), getInactiveP(edge.target))
-    const stroke = ip > 0.5 ? mutedEdgeColor : edge.baseStroke
     ctx.save()
-    ctx.strokeStyle = data.activeEdgeColor
+    const stroke = ip > 0.5 ? mutedEdgeColor : data.activeEdgeColor
+    ctx.strokeStyle = stroke
     ctx.lineWidth = 1.5
     ctx.globalAlpha = lerp(1, 0.55, ip)
     if (ip > 0.001) ctx.filter = `grayscale(${ip})`
@@ -618,7 +618,7 @@ function renderAnimFrame(
       const len = Math.sqrt(dx * dx + dy * dy)
       if (len > 0.5) {
         const nx = dx / len, ny = dy / len, sz = 7
-        ctx.fillStyle = data.activeEdgeColor
+        ctx.fillStyle = stroke
         ctx.beginPath()
         ctx.moveTo(ah.tx, ah.ty)
         ctx.lineTo(ah.tx - nx * sz + ny * sz * 0.5, ah.ty - ny * sz - nx * sz * 0.5)
@@ -1255,8 +1255,6 @@ export default function FlowDemo() {
         ...u16le(fw), ...u16le(fh),
         0b11110111, 0, 0,        // GCT present, 256 colors, bg=0, PAR=0
         ...Array.from(gct),
-        // Netscape 2.0 loop extension (infinite loop)
-        0x21, 0xff, 0x0b, ...enc.encode('NETSCAPE2.0'), 0x03, 0x01, 0x00, 0x00, 0x00,
       ])
       const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
       const frameHeader = new Uint8Array([
@@ -1858,7 +1856,7 @@ export default function FlowDemo() {
                 className="flow-canvas-action-btn"
                 onClick={() => setMediaMode('animate')}
                 disabled={jobRows === null || nodes.length === 0}
-                title="Export a WebM animation between two keyframes"
+                title="Export a GIF animation between two keyframes (plays once)"
               >
                 ANIMATE
               </button>
