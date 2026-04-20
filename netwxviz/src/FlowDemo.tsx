@@ -474,7 +474,40 @@ function extractAnimRenderData(
 
 const ANIM_DOT_R = 9    // half of the 18px circle diameter
 const ANIM_DOT_PAD = 4  // top padding in DotNode before the circle center
-const MUTED_EDGE_COLOR = 'rgba(148,163,184,0.55)'
+
+function withAlpha(color: string, alpha: number): string {
+  const a = Math.max(0, Math.min(1, alpha))
+  const c = color.trim()
+
+  // #rgb / #rrggbb
+  if (c.startsWith('#')) {
+    const hex = c.slice(1)
+    const full =
+      hex.length === 3
+        ? hex.split('').map((ch) => ch + ch).join('')
+        : hex.length === 6
+          ? hex
+          : null
+    if (full) {
+      const r = parseInt(full.slice(0, 2), 16)
+      const g = parseInt(full.slice(2, 4), 16)
+      const b = parseInt(full.slice(4, 6), 16)
+      return `rgba(${r},${g},${b},${a})`
+    }
+  }
+
+  // rgb(r,g,b) / rgba(r,g,b,a)
+  const m = c.match(/^rgba?\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+))?\s*\)$/i)
+  if (m) {
+    const r = Math.round(Number(m[1]))
+    const g = Math.round(Number(m[2]))
+    const b = Math.round(Number(m[3]))
+    return `rgba(${r},${g},${b},${a})`
+  }
+
+  // Fall back: if it's an unknown CSS color string, keep it unchanged.
+  return color
+}
 
 // Parse the last cubic bezier segment of a React Flow edge path (uppercase C = absolute coords).
 function arrowheadFromPath(d: string): { cp2x: number; cp2y: number; tx: number; ty: number } | null {
@@ -548,9 +581,10 @@ function renderAnimFrame(
     textColor: string
     labelPillBg: string
     labelPillBorder: string
+    mutedEdgeColor: string
   },
 ): ImageData {
-  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor, labelPillBg, labelPillBorder } = opts
+  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor, labelPillBg, labelPillBorder, mutedEdgeColor } = opts
   const fw = Math.max(1, Math.round(data.containerW * dpi))
   const fh = Math.max(1, Math.round(data.containerH * dpi))
   if (canvas.width !== fw) canvas.width = fw
@@ -569,7 +603,7 @@ function renderAnimFrame(
   // mirroring exactly what the node renderer does.
   for (const edge of data.edges) {
     const ip = Math.max(getInactiveP(edge.source), getInactiveP(edge.target))
-    const stroke = ip > 0.5 ? MUTED_EDGE_COLOR : edge.baseStroke
+    const stroke = ip > 0.5 ? mutedEdgeColor : edge.baseStroke
     ctx.save()
     ctx.strokeStyle = data.activeEdgeColor
     ctx.lineWidth = 1.5
@@ -809,6 +843,8 @@ export default function FlowDemo() {
   const [animDpiText, setAnimDpiText] = useState(() => String(2))
   const [animating, setAnimating] = useState(false)
   const [animProgress, setAnimProgress] = useState(0)
+  const animCancelRef = useRef(false)
+  const [animCancelRequested, setAnimCancelRequested] = useState(false)
 
   const resetFlow = useCallback(() => {
     setFlowReady(false)
@@ -1185,6 +1221,9 @@ export default function FlowDemo() {
       getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#16171d'
     const textH =
       getComputedStyle(document.documentElement).getPropertyValue('--text-h').trim() || '#f3f4f6'
+    const text =
+      getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#9ca3af'
+    const mutedEdgeColor = withAlpha(text, 0.55)
     const labelEl = plottingArea.querySelector<HTMLElement>('.flow-node-label')
     const labelStyles = labelEl ? getComputedStyle(labelEl) : null
     const labelPillBg =
@@ -1194,6 +1233,8 @@ export default function FlowDemo() {
 
     setAnimating(true)
     setAnimProgress(0)
+    animCancelRef.current = false
+    setAnimCancelRequested(false)
 
     try {
       // ── Extract render data once (no per-frame DOM work) ───────────────
@@ -1230,7 +1271,12 @@ export default function FlowDemo() {
       // ── Single loop: render + quantize + LZW encode per frame ──────────
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const gifChunks: any[] = [gifHeader]
+      let cancelled = false
       for (let i = 0; i < N; i++) {
+        if (animCancelRef.current) {
+          cancelled = true
+          break
+        }
         const t = N > 1 ? i / (N - 1) : 0
         const te = applyEasing(animCurve, t)
         const vp = {
@@ -1254,6 +1300,7 @@ export default function FlowDemo() {
           textColor: textH,
           labelPillBg,
           labelPillBorder,
+          mutedEdgeColor,
         })
 
         gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixedPaletteIndices(imageData))))
@@ -1262,6 +1309,8 @@ export default function FlowDemo() {
         // Yield every 8 frames so the progress bar can update
         if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
       }
+
+      if (cancelled) return
 
       gifChunks.push(new Uint8Array([0x3b])) // GIF Trailer
       const blob = new Blob(gifChunks, { type: 'image/gif' })
@@ -1297,6 +1346,8 @@ export default function FlowDemo() {
       })
       setAnimating(false)
       setAnimProgress(0)
+      animCancelRef.current = false
+      setAnimCancelRequested(false)
     }
   }, [
     animCurve,
@@ -1763,9 +1814,35 @@ export default function FlowDemo() {
         {/* ── Media toolbar (bottom-right) ─────────────────────────────── */}
         <div
           className="flow-media-palette"
-          data-hidden={exportingPng || animating ? 'true' : 'false'}
+          data-hidden={exportingPng ? 'true' : 'false'}
+          data-animating={animating ? 'true' : 'false'}
         >
-          {mediaMode === 'none' ? (
+          {animating ? (
+            <div className="flow-media-generating" role="status" aria-live="polite">
+              <span className="flow-media-generating-title">Generating animation…</span>
+              <div
+                className="flow-media-progress flow-media-progress--inline"
+                title={`Rendering… ${Math.round(animProgress * 100)}%`}
+              >
+                <div
+                  className="flow-media-progress-bar"
+                  style={{ width: `${Math.round(animProgress * 100)}%` }}
+                />
+              </div>
+              <button
+                type="button"
+                className="flow-canvas-action-btn"
+                onClick={() => {
+                  animCancelRef.current = true
+                  setAnimCancelRequested(true)
+                }}
+                disabled={animCancelRequested}
+                title="Cancel animation render"
+              >
+                {animCancelRequested ? 'Cancelling…' : 'Cancel'}
+              </button>
+            </div>
+          ) : mediaMode === 'none' ? (
             <>
               <button
                 type="button"
@@ -1998,18 +2075,6 @@ export default function FlowDemo() {
               </button>
             </>
           )}
-
-          {animating ? (
-            <div
-              className="flow-media-progress"
-              title={`Rendering… ${Math.round(animProgress * 100)}%`}
-            >
-              <div
-                className="flow-media-progress-bar"
-                style={{ width: `${Math.round(animProgress * 100)}%` }}
-              />
-            </div>
-          ) : null}
         </div>
 
         {jobRows === null ? (

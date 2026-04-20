@@ -437,6 +437,11 @@ code {
     transform 140ms ease;
 }
 
+.flow-media-palette[data-animating='true'] {
+  /* Slightly lighter so the inline status reads cleaner. */
+  background: rgba(0, 0, 0, 0.14);
+}
+
 .flow-canvas-wrap:hover .flow-media-palette,
 .flow-media-palette:focus-within {
   opacity: 1;
@@ -512,9 +517,36 @@ code {
   margin-top: 2px;
 }
 
+.flow-media-progress--inline {
+  width: 160px;
+  margin-top: 0;
+}
+
 .flow-media-progress-bar {
   height: 100%;
   background: var(--accent);
   border-radius: 2px;
   transition: width 80ms linear;
+}
+
+.flow-media-generating {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px;
+}
+
+.flow-media-generating-title {
+  font-size: 12px;
+  font-weight: 400;
+  color: #000;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.flow-media-generating-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
 }
