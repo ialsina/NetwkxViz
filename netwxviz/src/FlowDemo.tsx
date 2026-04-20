@@ -768,21 +768,6 @@ export default function FlowDemo() {
             style={{ display: 'none' }}
             onChange={onFileChange}
           />
-          <button
-            type="button"
-            className="flow-toolbar-btn"
-            onClick={onPickFile}
-          >
-            Select jobs file…
-          </button>
-          <button
-            type="button"
-            className="flow-toolbar-btn"
-            onClick={loadSample}
-            disabled={loadingSample}
-          >
-            {loadingSample ? 'Loading…' : 'Load sample'}
-          </button>
           <label
             style={{
               display: 'inline-flex',
@@ -888,6 +873,21 @@ export default function FlowDemo() {
               <option value="chunk">Chunk</option>
             </select>
           </label>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
+            onClick={onPickFile}
+          >
+            Select jobs file…
+          </button>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
+            onClick={loadSample}
+            disabled={loadingSample}
+          >
+            {loadingSample ? 'Loading…' : 'Load sample'}
+          </button>
           <button
             type="button"
             className="flow-toolbar-btn"
