@@ -317,6 +317,10 @@ function hslFromKey(key: string, sampler: GraphColorSampler): string {
   return `hsl(${hashHue(key)} ${sampler.nodeSaturation} ${sampler.nodeLightness})`
 }
 
+function classificationKeyCaseInsensitive(value: string): string {
+  return value.toLocaleLowerCase()
+}
+
 /**
  * Stable legend row for expanded nodes: same keys as {@link colorForExpandedNode}.
  * Returns `null` for dependency-only (“extra”) nodes that are always gray.
@@ -348,8 +352,8 @@ export function colorLegendKeyAndLabel(
     case 'platform': {
       const p = ctx.platform.trim() || '(unset)'
       return {
-        key: p,
-        label: p === '(unset)' ? 'PLATFORM (unset)' : `PLATFORM: ${p}`,
+        key: classificationKeyCaseInsensitive(p),
+        label: p,
       }
     }
     case 'member': {
@@ -395,7 +399,7 @@ export function colorForExpandedNode(
       return `hsl(${FREQUENCY_LEVEL_HUES[ctx.frequency]} ${sampler.nodeSaturation} ${sampler.nodeLightness})`
     case 'platform': {
       const p = ctx.platform.trim() || '(unset)'
-      return hslFromKey(p, sampler)
+      return hslFromKey(classificationKeyCaseInsensitive(p), sampler)
     }
     case 'member': {
       const m = ctx.member ?? '—'

@@ -71,7 +71,7 @@ function legendValueLabel(mode: NodeColorMode, e: { key: string; label: string }
     case 'chunk':
     case 'name':
     default:
-      return e.key
+      return mode === 'platform' ? e.label : e.key
   }
 }
 
