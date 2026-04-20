@@ -271,35 +271,64 @@ function clampByte(n: number): number {
 }
 
 function makeFixed256ColorTable(): Uint8Array {
-  // 3-3-2 quantization: r(3 bits), g(3 bits), b(2 bits) = 256 colors
+  // Grey-preserving fixed palette:
+  // - 6×6×6 color cube (216 colors)
+  // - 40-step grayscale ramp (40 colors)
+  // Total = 256.
   const table = new Uint8Array(256 * 3)
-  for (let i = 0; i < 256; i++) {
-    const r3 = (i >> 5) & 0x7
-    const g3 = (i >> 2) & 0x7
-    const b2 = i & 0x3
-    const r = clampByte((r3 * 255) / 7)
-    const g = clampByte((g3 * 255) / 7)
-    const b = clampByte((b2 * 255) / 3)
-    table[i * 3 + 0] = r
-    table[i * 3 + 1] = g
-    table[i * 3 + 2] = b
+  let idx = 0
+
+  for (let r6 = 0; r6 < 6; r6++) {
+    for (let g6 = 0; g6 < 6; g6++) {
+      for (let b6 = 0; b6 < 6; b6++) {
+        table[idx * 3 + 0] = clampByte((r6 * 255) / 5)
+        table[idx * 3 + 1] = clampByte((g6 * 255) / 5)
+        table[idx * 3 + 2] = clampByte((b6 * 255) / 5)
+        idx++
+      }
+    }
   }
+
+  for (let k = 0; k < 40; k++) {
+    const v = clampByte((k * 255) / 39)
+    table[idx * 3 + 0] = v
+    table[idx * 3 + 1] = v
+    table[idx * 3 + 2] = v
+    idx++
+  }
+
   return table
 }
 
-function rgbaToFixed332Indices(img: ImageData): Uint8Array {
+function rgbaToFixedPaletteIndices(img: ImageData): Uint8Array {
   const { data, width, height } = img
   const out = new Uint8Array(width * height)
+
   for (let p = 0, i = 0; p < out.length; p++, i += 4) {
     const r = data[i]
     const g = data[i + 1]
     const b = data[i + 2]
-    // Ignore alpha; the rendered frames should already have background baked in.
-    const r3 = r >> 5
-    const g3 = g >> 5
-    const b2 = b >> 6
-    out[p] = (r3 << 5) | (g3 << 2) | b2
+    // Ignore alpha; rendered frames have background already composited in.
+
+    // Candidate 1: nearest entry in the 6×6×6 colour cube (indices 0..215).
+    const r6 = Math.max(0, Math.min(5, Math.round((r * 5) / 255)))
+    const g6 = Math.max(0, Math.min(5, Math.round((g * 5) / 255)))
+    const b6 = Math.max(0, Math.min(5, Math.round((b * 5) / 255)))
+    const cr = clampByte((r6 * 255) / 5)
+    const cg = clampByte((g6 * 255) / 5)
+    const cb = clampByte((b6 * 255) / 5)
+    const cubeErr = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb)
+
+    // Candidate 2: nearest entry in the 40-step grayscale ramp (indices 216..255).
+    const y = (r + g + b) / 3
+    const k = Math.max(0, Math.min(39, Math.round((y * 39) / 255)))
+    const gv = clampByte((k * 255) / 39)
+    const grayErr = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv)
+
+    // Pick whichever candidate is actually closer in RGB space — no heuristics needed.
+    out[p] = grayErr < cubeErr ? 216 + k : r6 * 36 + g6 * 6 + b6
   }
+
   return out
 }
 
@@ -374,12 +403,12 @@ function toSubBlocks(data: Uint8Array): Uint8Array {
 type AnimRenderData = {
   containerW: number
   containerH: number
+  activeEdgeColor: string
   edges: Array<{
     pathD: string
     isDashed: boolean
     source: string
     target: string
-    baseStroke: string
   }>
   nodes: Array<{
     id: string
@@ -398,10 +427,12 @@ function extractAnimRenderData(
   plottingArea: HTMLElement,
   reactNodes: DotNodeType[],
   reactEdges: Edge<JobEdgeData>[],
+  activeEdgeColor: string,
 ): AnimRenderData {
   const rect = plottingArea.getBoundingClientRect()
 
-  // Extract SVG path `d` attributes from the DOM (in graph coordinates, inside viewport).
+  // Extract SVG path `d` attributes from the DOM (geometry only — colours are derived from
+  // activeEdgeColor, not from live edge styles which may already be mutated to the muted shade).
   const edgePathMap = new Map<string, { pathD: string; isDashed: boolean }>()
   plottingArea.querySelectorAll<Element>('[data-id]').forEach((el) => {
     const pathEl = el.querySelector<SVGPathElement>('path')
@@ -420,7 +451,6 @@ function extractAnimRenderData(
       isDashed: edgePathMap.get(e.id)?.isDashed ?? false,
       source: e.source,
       target: e.target,
-      baseStroke: typeof e.style?.stroke === 'string' ? e.style.stroke : '#888',
     }))
     .filter((e) => e.pathD !== '')
 
@@ -439,7 +469,7 @@ function extractAnimRenderData(
     }
   })
 
-  return { containerW: Math.round(rect.width), containerH: Math.round(rect.height), edges, nodes }
+  return { containerW: Math.round(rect.width), containerH: Math.round(rect.height), activeEdgeColor, edges, nodes }
 }
 
 const ANIM_DOT_R = 9    // half of the 18px circle diameter
@@ -464,6 +494,8 @@ function renderNodeLabelOnCanvas(
   dotBottom: number,
   alpha: number,
   textColor: string,
+  pillBg: string,
+  pillBorder: string,
 ) {
   const padH = 8, padV = 4, r = 10, fs1 = 11, fs2 = 10, lh1 = 14, lh2 = 13
   ctx.save()
@@ -475,8 +507,8 @@ function renderNodeLabelOnCanvas(
   const pillW = Math.max(w1, w2) + padH * 2
   const pillH = (line2 ? lh1 + lh2 + 2 : lh1) + padV * 2
   const pillX = cx - pillW / 2, pillY = dotBottom + 4
-  ctx.fillStyle = 'rgba(0,0,0,0.30)'
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+  ctx.fillStyle = pillBg
+  ctx.strokeStyle = pillBorder
   ctx.lineWidth = 1
   ctx.beginPath()
   if (typeof (ctx as CanvasRenderingContext2D & { roundRect?: unknown }).roundRect === 'function') {
@@ -514,9 +546,11 @@ function renderAnimFrame(
     backgroundColor: string
     showLabels: boolean
     textColor: string
+    labelPillBg: string
+    labelPillBorder: string
   },
 ): ImageData {
-  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor } = opts
+  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor, labelPillBg, labelPillBorder } = opts
   const fw = Math.max(1, Math.round(data.containerW * dpi))
   const fh = Math.max(1, Math.round(data.containerH * dpi))
   if (canvas.width !== fw) canvas.width = fw
@@ -531,13 +565,16 @@ function renderAnimFrame(
   ctx.scale(viewport.zoom, viewport.zoom)
 
   // ── Edges ──────────────────────────────────────────────────────────────
+  // Always use the palette's active edge colour; apply grayscale + alpha fade for inactive,
+  // mirroring exactly what the node renderer does.
   for (const edge of data.edges) {
     const ip = Math.max(getInactiveP(edge.source), getInactiveP(edge.target))
     const stroke = ip > 0.5 ? MUTED_EDGE_COLOR : edge.baseStroke
     ctx.save()
-    ctx.strokeStyle = stroke
+    ctx.strokeStyle = data.activeEdgeColor
     ctx.lineWidth = 1.5
     ctx.globalAlpha = lerp(1, 0.55, ip)
+    if (ip > 0.001) ctx.filter = `grayscale(${ip})`
     if (edge.isDashed) ctx.setLineDash([6, 5])
     ctx.stroke(new Path2D(edge.pathD))
     ctx.setLineDash([])
@@ -547,7 +584,7 @@ function renderAnimFrame(
       const len = Math.sqrt(dx * dx + dy * dy)
       if (len > 0.5) {
         const nx = dx / len, ny = dy / len, sz = 7
-        ctx.fillStyle = stroke
+        ctx.fillStyle = data.activeEdgeColor
         ctx.beginPath()
         ctx.moveTo(ah.tx, ah.ty)
         ctx.lineTo(ah.tx - nx * sz + ny * sz * 0.5, ah.ty - ny * sz - nx * sz * 0.5)
@@ -573,7 +610,17 @@ function renderAnimFrame(
     ctx.fill()
     ctx.restore()
     if (opts.showLabels && node.showLabel && node.label) {
-      renderNodeLabelOnCanvas(ctx, node.label, node.labelLine2, cx, cy + ANIM_DOT_R, lerp(1, 0.55, ip), textColor)
+      renderNodeLabelOnCanvas(
+        ctx,
+        node.label,
+        node.labelLine2,
+        cx,
+        cy + ANIM_DOT_R,
+        lerp(1, 0.55, ip),
+        textColor,
+        labelPillBg,
+        labelPillBorder,
+      )
     }
   }
 
@@ -655,6 +702,7 @@ const DotNode = ({
 
       {showLabel ? (
         <div
+          className="flow-node-label"
           style={{
             marginTop: 4,
             pointerEvents: 'none',
@@ -1137,13 +1185,19 @@ export default function FlowDemo() {
       getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#16171d'
     const textH =
       getComputedStyle(document.documentElement).getPropertyValue('--text-h').trim() || '#f3f4f6'
+    const labelEl = plottingArea.querySelector<HTMLElement>('.flow-node-label')
+    const labelStyles = labelEl ? getComputedStyle(labelEl) : null
+    const labelPillBg =
+      labelStyles?.backgroundColor?.trim() || 'rgba(0,0,0,0.30)'
+    const labelPillBorder =
+      labelStyles?.borderTopColor?.trim() || 'rgba(255,255,255,0.12)'
 
     setAnimating(true)
     setAnimProgress(0)
 
     try {
       // ── Extract render data once (no per-frame DOM work) ───────────────
-      const renderData = extractAnimRenderData(plottingArea, nodes, edges)
+      const renderData = extractAnimRenderData(plottingArea, nodes, edges, palette.edgeColor)
       const fw = Math.max(1, Math.round(renderData.containerW * animDpi))
       const fh = Math.max(1, Math.round(renderData.containerH * animDpi))
 
@@ -1194,10 +1248,15 @@ export default function FlowDemo() {
 
         const imageData = renderAnimFrame(frameCanvas, {
           data: renderData, viewport: vp, getInactiveP,
-          dpi: animDpi, backgroundColor: bg, showLabels: showJobNames, textColor: textH,
+          dpi: animDpi,
+          backgroundColor: bg,
+          showLabels: showJobNames,
+          textColor: textH,
+          labelPillBg,
+          labelPillBorder,
         })
 
-        gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixed332Indices(imageData))))
+        gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixedPaletteIndices(imageData))))
 
         setAnimProgress((i + 1) / N)
         // Yield every 8 frames so the progress bar can update
@@ -1249,6 +1308,7 @@ export default function FlowDemo() {
     edges,
     fileLabel,
     nodes,
+    palette.edgeColor,
     setNodes,
     showJobNames,
   ])
