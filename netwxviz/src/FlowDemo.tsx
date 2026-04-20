@@ -1349,8 +1349,7 @@ export default function FlowDemo() {
           ...u16le(fw), ...u16le(fh),
           0b11110111, 0, 0,
           ...Array.from(gct),
-          // Netscape 2.0 loop extension (infinite loop)
-          0x21, 0xff, 0x0b, ...enc.encode('NETSCAPE2.0'), 0x03, 0x01, 0x00, 0x00, 0x00,
+          // No Netscape loop extension => play once (no forced looping)
         ])
         const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
         const frameHeader = new Uint8Array([
