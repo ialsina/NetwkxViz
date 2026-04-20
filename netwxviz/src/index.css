@@ -85,10 +85,10 @@ body {
   height: 100%;
 }
 
-.flow-canvas-actions-left,
-.flow-canvas-actions-right {
+.flow-canvas-palette {
   position: absolute;
   top: 10px;
+  right: 10px;
   z-index: 5;
   display: flex;
   gap: 8px;
@@ -107,27 +107,23 @@ body {
     transform 140ms ease;
 }
 
-.flow-canvas-actions-left {
-  left: 10px;
-}
-
-.flow-canvas-actions-right {
-  right: 10px;
-}
-
-.flow-canvas-wrap:hover .flow-canvas-actions-left,
-.flow-canvas-wrap:hover .flow-canvas-actions-right,
-.flow-canvas-actions-left:focus-within,
-.flow-canvas-actions-right:focus-within {
+.flow-canvas-wrap:hover .flow-canvas-palette,
+.flow-canvas-palette:focus-within {
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
 }
 
-.flow-canvas-actions-left[data-hidden='true'],
-.flow-canvas-actions-right[data-hidden='true'] {
+.flow-canvas-palette[data-hidden='true'] {
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+.flow-canvas-palette-sep {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.18);
+  margin: 0 2px;
 }
 
 .flow-canvas-action-btn {
@@ -139,6 +135,9 @@ body {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-h);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .flow-canvas-action-btn:hover:not(:disabled) {
@@ -148,6 +147,11 @@ body {
 .flow-canvas-action-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.flow-canvas-action-btn[aria-pressed='true'] {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: var(--accent-border);
 }
 
 .flow-demo {

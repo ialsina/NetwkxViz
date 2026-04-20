@@ -891,25 +891,6 @@ export default function FlowDemo() {
           <button
             type="button"
             className="flow-toolbar-btn"
-            onClick={() => setShowJobNames((v) => !v)}
-            disabled={jobRows === null}
-            aria-pressed={showJobNames}
-            title="Toggle job name labels"
-          >
-            {showJobNames ? 'Hide names' : 'Show names'}
-          </button>
-          <button
-            type="button"
-            className="flow-toolbar-btn"
-            onClick={() => setShowLegend((v) => !v)}
-            aria-pressed={showLegend}
-            title="Toggle graph legend (edges and nodes)"
-          >
-            {showLegend ? 'Hide legend' : 'Show legend'}
-          </button>
-          <button
-            type="button"
-            className="flow-toolbar-btn"
             onClick={clearGraph}
             disabled={jobRows === null}
           >
@@ -1038,7 +1019,7 @@ export default function FlowDemo() {
       ) : null}
 
       <div className="flow-canvas-wrap">
-        <div className="flow-canvas-actions-left" data-hidden={exportingPng ? 'true' : 'false'}>
+        <div className="flow-canvas-palette" data-hidden={exportingPng ? 'true' : 'false'}>
           <button
             type="button"
             className="flow-canvas-action-btn"
@@ -1058,12 +1039,7 @@ export default function FlowDemo() {
           </button>
           <span
             aria-hidden="true"
-            style={{
-              width: 1,
-              height: 16,
-              background: 'rgba(255,255,255,0.18)',
-              margin: '0 2px',
-            }}
+            className="flow-canvas-palette-sep"
           />
           <button
             type="button"
@@ -1099,9 +1075,7 @@ export default function FlowDemo() {
           >
             ACTIVE
           </button>
-        </div>
-
-        <div className="flow-canvas-actions-right" data-hidden={exportingPng ? 'true' : 'false'}>
+          <span aria-hidden="true" className="flow-canvas-palette-sep" />
           <button
             type="button"
             className="flow-canvas-action-btn"
@@ -1109,8 +1083,31 @@ export default function FlowDemo() {
             disabled={jobRows === null || nodes.length === 0}
             title="Fit and center the graph in the view"
           >
-            Center
+            CENTER
           </button>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={() => setShowJobNames((v) => !v)}
+            disabled={jobRows === null || nodes.length === 0}
+            aria-pressed={showJobNames}
+            title="Toggle job name labels"
+            style={{ fontSize: 11, letterSpacing: '0.4px' }}
+          >
+            NAMES
+          </button>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={() => setShowLegend((v) => !v)}
+            disabled={jobRows === null || nodes.length === 0}
+            aria-pressed={showLegend}
+            title="Toggle graph legend (edges and nodes)"
+            style={{ fontSize: 11, letterSpacing: '0.4px' }}
+          >
+            LEGEND
+          </button>
+          <span aria-hidden="true" className="flow-canvas-palette-sep" />
           <button
             type="button"
             className="flow-canvas-action-btn"
@@ -1118,7 +1115,7 @@ export default function FlowDemo() {
             disabled={jobRows === null || nodes.length === 0 || exportingPng}
             title="Download the workflow picture as a PNG"
           >
-            {exportingPng ? 'Downloading…' : 'Download PNG'}
+            {exportingPng ? 'Downloading…' : 'DOWNLOAD'}
           </button>
         </div>
         {jobRows === null ? (
