@@ -169,7 +169,7 @@ function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
 }
 
 type ExportFormat = 'png' | 'jpg' | 'svg'
-type ExportBackground = 'transparent' | 'white'
+type ExportBackground = 'transparent' | 'white' | 'dark'
 
 function elementToSvgText(el: HTMLElement, opts?: { backgroundColor?: string }) {
   const rect = el.getBoundingClientRect()
@@ -662,6 +662,57 @@ function renderAnimFrame(
   return ctx.getImageData(0, 0, fw, fh)
 }
 
+// Encodes pre-rendered ImageData frames into a video using MediaRecorder.
+// Progress (0–1) is reported via onProgress as frames are drawn in real-time.
+// Returns the blob and the actual file extension ('mp4' or 'webm').
+async function framesToVideoBlob(
+  frames: ImageData[],
+  fps: number,
+  onProgress?: (p: number) => void,
+): Promise<{ blob: Blob; ext: string }> {
+  if (frames.length === 0) throw new Error('No frames to encode')
+  const { width, height } = frames[0]
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas 2D unavailable')
+
+  // Prefer native MP4; fall back to WebM with the best available codec.
+  const candidates: { mime: string; ext: string }[] = [
+    { mime: 'video/mp4;codecs=avc1', ext: 'mp4' },
+    { mime: 'video/mp4;codecs=h264', ext: 'mp4' },
+    { mime: 'video/mp4', ext: 'mp4' },
+    { mime: 'video/webm;codecs=h264', ext: 'mp4' },
+    { mime: 'video/webm;codecs=vp9', ext: 'webm' },
+    { mime: 'video/webm;codecs=vp8', ext: 'webm' },
+    { mime: 'video/webm', ext: 'webm' },
+  ]
+  const chosen = candidates.find((c) => {
+    try { return MediaRecorder.isTypeSupported(c.mime) } catch { return false }
+  }) ?? { mime: 'video/webm', ext: 'webm' }
+
+  const stream = canvas.captureStream(fps)
+  const recorder = new MediaRecorder(stream, { mimeType: chosen.mime })
+  const chunks: Blob[] = []
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+  const done = new Promise<Blob>((resolve) => {
+    recorder.onstop = () => resolve(new Blob(chunks, { type: chosen.mime }))
+  })
+
+  const msPerFrame = 1000 / Math.max(1, fps)
+  recorder.start()
+  for (let i = 0; i < frames.length; i++) {
+    ctx.putImageData(frames[i], 0, 0)
+    onProgress?.((i + 1) / frames.length)
+    await new Promise((r) => setTimeout(r, msPerFrame))
+  }
+  recorder.stop()
+  return { blob: await done, ext: chosen.ext }
+}
+
+type AnimFormat = 'gif' | 'mp4'
+
 type GraphConfig = {
   curvature: 'bezier' | 'smoothstep' | 'straight'
   edgeWidth: number
@@ -805,6 +856,17 @@ export default function FlowDemo() {
     [paletteId],
   )
 
+  const [darkMode, setDarkMode] = useState<boolean>(
+    () => window.matchMedia('(prefers-color-scheme: dark)').matches,
+  )
+
+  useEffect(() => {
+    document.documentElement.setAttribute(
+      'data-theme',
+      darkMode ? 'dark' : 'light',
+    )
+  }, [darkMode])
+
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [jobRows, setJobRows] = useState<JobRow[] | null>(null)
   const [fileLabel, setFileLabel] = useState<string>('')
@@ -841,6 +903,7 @@ export default function FlowDemo() {
   const [animFpsText, setAnimFpsText] = useState(() => String(24))
   const [animDpi, setAnimDpi] = useState(2)
   const [animDpiText, setAnimDpiText] = useState(() => String(2))
+  const [animFormat, setAnimFormat] = useState<AnimFormat>('gif')
   const [animating, setAnimating] = useState(false)
   const [animProgress, setAnimProgress] = useState(0)
   const animCancelRef = useRef(false)
@@ -887,7 +950,7 @@ export default function FlowDemo() {
       colorMode: nodeColorMode,
       colorPalette: {
         nodeSaturation: palette.nodeSaturation,
-        nodeLightness: palette.nodeLightness,
+        nodeLightness: darkMode ? palette.nodeLightnessDark : palette.nodeLightness,
       },
     })
     const laidOut = layoutWithDagre(built.nodes, built.edges, {
@@ -932,6 +995,7 @@ export default function FlowDemo() {
     config.curvature,
     config.edgeAnimated,
     config.edgeWidth,
+    darkMode,
   ])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<DotNodeType>([])
@@ -1133,7 +1197,9 @@ export default function FlowDemo() {
       const backgroundColor =
         exportBackground === 'white'
           ? '#ffffff'
-          : undefined
+          : exportBackground === 'dark'
+            ? '#16171d'
+            : undefined
 
       let outBlob: Blob
       let ext: string
@@ -1247,34 +1313,12 @@ export default function FlowDemo() {
       frameCanvas.width = fw
       frameCanvas.height = fh
 
-      // Pre-build the GIF header as a single Uint8Array.
-      const enc = new TextEncoder()
-      const gct = makeFixed256ColorTable()
-      const gifHeader = new Uint8Array([
-        ...enc.encode('GIF89a'),
-        ...u16le(fw), ...u16le(fh),
-        0b11110111, 0, 0,        // GCT present, 256 colors, bg=0, PAR=0
-        ...Array.from(gct),
-      ])
-      const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
-      const frameHeader = new Uint8Array([
-        // Graphic Control Extension
-        0x21, 0xf9, 0x04, 0x00, ...u16le(delayCs), 0x00, 0x00,
-        // Image Descriptor
-        0x2c, ...u16le(0), ...u16le(0), ...u16le(fw), ...u16le(fh), 0x00,
-        // LZW min code size
-        0x08,
-      ])
-
-      // ── Single loop: render + quantize + LZW encode per frame ──────────
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const gifChunks: any[] = [gifHeader]
-      let cancelled = false
-      for (let i = 0; i < N; i++) {
-        if (animCancelRef.current) {
-          cancelled = true
-          break
-        }
+      // Shared per-frame render helper used by both GIF and MP4 paths.
+      const renderOpts = {
+        data: renderData, dpi: animDpi, backgroundColor: bg,
+        showLabels: showJobNames, textColor: textH, labelPillBg, labelPillBorder, mutedEdgeColor,
+      }
+      const buildVpAndInactiveP = (i: number) => {
         const t = N > 1 ? i / (N - 1) : 0
         const te = applyEasing(animCurve, t)
         const vp = {
@@ -1289,29 +1333,63 @@ export default function FlowDemo() {
           if (!inStart && !inEnd) return 0
           return inStart ? 1 - te : te
         }
-
-        const imageData = renderAnimFrame(frameCanvas, {
-          data: renderData, viewport: vp, getInactiveP,
-          dpi: animDpi,
-          backgroundColor: bg,
-          showLabels: showJobNames,
-          textColor: textH,
-          labelPillBg,
-          labelPillBorder,
-          mutedEdgeColor,
-        })
-
-        gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixedPaletteIndices(imageData))))
-
-        setAnimProgress((i + 1) / N)
-        // Yield every 8 frames so the progress bar can update
-        if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
+        return { vp, getInactiveP }
       }
 
-      if (cancelled) return
+      let blob: Blob
+      let ext: string
+      let cancelled = false
 
-      gifChunks.push(new Uint8Array([0x3b])) // GIF Trailer
-      const blob = new Blob(gifChunks, { type: 'image/gif' })
+      if (animFormat === 'gif') {
+        // ── GIF: stream render + LZW encode in a single loop ─────────────
+        const enc = new TextEncoder()
+        const gct = makeFixed256ColorTable()
+        const gifHeader = new Uint8Array([
+          ...enc.encode('GIF89a'),
+          ...u16le(fw), ...u16le(fh),
+          0b11110111, 0, 0,
+          ...Array.from(gct),
+          // Netscape 2.0 loop extension (infinite loop)
+          0x21, 0xff, 0x0b, ...enc.encode('NETSCAPE2.0'), 0x03, 0x01, 0x00, 0x00, 0x00,
+        ])
+        const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
+        const frameHeader = new Uint8Array([
+          0x21, 0xf9, 0x04, 0x00, ...u16le(delayCs), 0x00, 0x00,
+          0x2c, ...u16le(0), ...u16le(0), ...u16le(fw), ...u16le(fh), 0x00,
+          0x08,
+        ])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const gifChunks: any[] = [gifHeader]
+        for (let i = 0; i < N; i++) {
+          if (animCancelRef.current) { cancelled = true; break }
+          const { vp, getInactiveP } = buildVpAndInactiveP(i)
+          const imageData = renderAnimFrame(frameCanvas, { ...renderOpts, viewport: vp, getInactiveP })
+          gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixedPaletteIndices(imageData))))
+          setAnimProgress((i + 1) / N)
+          if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
+        }
+        if (cancelled) return
+        gifChunks.push(new Uint8Array([0x3b]))
+        blob = new Blob(gifChunks, { type: 'image/gif' })
+        ext = 'gif'
+      } else {
+        // ── MP4: phase 1 — render all frames to ImageData (0–70%) ────────
+        const prerendered: ImageData[] = []
+        for (let i = 0; i < N; i++) {
+          if (animCancelRef.current) { cancelled = true; break }
+          const { vp, getInactiveP } = buildVpAndInactiveP(i)
+          prerendered.push(renderAnimFrame(frameCanvas, { ...renderOpts, viewport: vp, getInactiveP }))
+          setAnimProgress(((i + 1) / N) * 0.7)
+          if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
+        }
+        if (cancelled) return
+        // ── MP4: phase 2 — MediaRecorder encodes at real-time speed (70–100%) ──
+        ;({ blob, ext } = await framesToVideoBlob(
+          prerendered,
+          animFps,
+          (p) => setAnimProgress(0.7 + p * 0.3),
+        ))
+      }
 
       const base =
         (fileLabel || 'workflow')
@@ -1320,11 +1398,10 @@ export default function FlowDemo() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${base}-animation.gif`
+      a.download = `${base}-animation.${ext}`
       document.body.appendChild(a)
       a.click()
       a.remove()
-      // Give the browser time to start the download before revoking.
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } finally {
       // Restore viewport + node states to the end frame
@@ -1352,6 +1429,7 @@ export default function FlowDemo() {
     animDpi,
     animDurationSec,
     animEndFrame,
+    animFormat,
     animFps,
     animStartFrame,
     edges,
@@ -1592,6 +1670,16 @@ export default function FlowDemo() {
             disabled={jobRows === null}
           >
             Clear
+          </button>
+          <button
+            type="button"
+            className="flow-toolbar-btn"
+            onClick={() => setDarkMode((d) => !d)}
+            title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-pressed={darkMode}
+          >
+            {darkMode ? '☀' : '☾'}
           </button>
         </div>
       </div>
@@ -1885,6 +1973,7 @@ export default function FlowDemo() {
                   aria-label="Export background"
                 >
                   <option value="white">White</option>
+                  <option value="dark">Dark</option>
                   <option value="transparent">Transparent</option>
                 </select>
               </div>
@@ -2037,6 +2126,18 @@ export default function FlowDemo() {
                   aria-label="Animation FPS"
                 />
               </div>
+              <div className="flow-media-field">
+                <span className="flow-media-label">Format</span>
+                <select
+                  className="flow-toolbar-select flow-media-select"
+                  value={animFormat}
+                  onChange={(e) => setAnimFormat(e.target.value as AnimFormat)}
+                  aria-label="Animation format"
+                >
+                  <option value="gif">GIF</option>
+                  <option value="mp4">MP4</option>
+                </select>
+              </div>
               <span aria-hidden="true" className="flow-canvas-palette-sep" />
               <button
                 type="button"
@@ -2135,7 +2236,7 @@ export default function FlowDemo() {
                 id="bg"
                 gap={18}
                 size={1.2}
-                color="rgba(148,163,184,0.35)"
+                color={darkMode ? 'rgba(148,163,184,0.22)' : 'rgba(148,163,184,0.40)'}
                 variant={config.backgroundVariant}
               />
               {showLegend ? (

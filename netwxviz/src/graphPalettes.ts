@@ -5,6 +5,7 @@ export type GraphColorPalette = {
   edgeColor: string
   nodeSaturation: string
   nodeLightness: string
+  nodeLightnessDark: string
 }
 
 export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
@@ -14,6 +15,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#8b5cf6',
     nodeSaturation: '55%',
     nodeLightness: '52%',
+    nodeLightnessDark: '66%',
   },
   {
     id: 'teal',
@@ -21,6 +23,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#14b8a6',
     nodeSaturation: '48%',
     nodeLightness: '46%',
+    nodeLightnessDark: '60%',
   },
   {
     id: 'ocean',
@@ -28,6 +31,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#3b82f6',
     nodeSaturation: '52%',
     nodeLightness: '50%',
+    nodeLightnessDark: '64%',
   },
   {
     id: 'sunset',
@@ -35,6 +39,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#f97316',
     nodeSaturation: '58%',
     nodeLightness: '52%',
+    nodeLightnessDark: '65%',
   },
   {
     id: 'forest',
@@ -42,6 +47,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#22c55e',
     nodeSaturation: '45%',
     nodeLightness: '42%',
+    nodeLightnessDark: '58%',
   },
   {
     id: 'rose',
@@ -49,6 +55,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#ec4899',
     nodeSaturation: '52%',
     nodeLightness: '52%',
+    nodeLightnessDark: '66%',
   },
   {
     id: 'slate',
@@ -56,6 +63,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#94a3b8',
     nodeSaturation: '28%',
     nodeLightness: '48%',
+    nodeLightnessDark: '62%',
   },
   {
     id: 'amber',
@@ -63,6 +71,7 @@ export const GRAPH_COLOR_PALETTES: GraphColorPalette[] = [
     edgeColor: '#f59e0b',
     nodeSaturation: '55%',
     nodeLightness: '50%',
+    nodeLightnessDark: '63%',
   },
 ]
 
