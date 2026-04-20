@@ -135,6 +135,32 @@ function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
     copyComputedStyles(s, t, includeStyle)
   }
 
+  // Remove elements we don't want in exports (after styling, to keep DOM alignment).
+  clone
+    .querySelectorAll(
+      [
+        // Dotted grid background.
+        '.react-flow__background',
+        '.xy-flow__background',
+        // React Flow a11y instructions / live regions.
+        '.react-flow__aria-live',
+        '.xy-flow__aria-live',
+        '[aria-live]',
+        // Misc overlays we never want in the exported picture.
+        '.react-flow__attribution',
+        '.xy-flow__attribution',
+      ].join(','),
+    )
+    .forEach((el) => el.remove())
+
+  // Export-only layout fixes: SVG foreignObject rendering doesn't reliably support flex `gap`,
+  // so add a margin fallback for legend swatches to keep spacing consistent in the PNG.
+  clone.querySelectorAll<HTMLElement>('.flow-legend-swatch').forEach((el) => {
+    el.style.marginRight = '10px'
+    el.style.flexShrink = '0'
+    el.style.display = 'inline-block'
+  })
+
   return clone
 }
 
@@ -166,7 +192,8 @@ async function elementToPngDataUrl(el: HTMLElement, opts?: { backgroundColor?: s
     })
 
     const canvas = document.createElement('canvas')
-    const ratio = Math.min(2, window.devicePixelRatio || 1)
+    // Higher export resolution than on-screen. Cap to avoid huge canvases for very large graphs.
+    const ratio = Math.min(6, Math.max(3, (window.devicePixelRatio || 1) * 2))
     canvas.width = Math.round(width * ratio)
     canvas.height = Math.round(height * ratio)
     const ctx = canvas.getContext('2d')
@@ -452,12 +479,12 @@ export default function FlowDemo() {
   const downloadPng = useCallback(async () => {
     if (jobRows === null || nodes.length === 0) return
     const root = flowCanvasRef.current
-    const viewport =
-      root?.querySelector<HTMLElement>('.react-flow__viewport') ??
-      root?.querySelector<HTMLElement>('.xy-flow__viewport') ??
+    const plottingArea =
+      root?.querySelector<HTMLElement>('.react-flow') ??
+      root?.querySelector<HTMLElement>('.xy-flow') ??
       root
 
-    if (!viewport) return
+    if (!plottingArea) return
 
     setExportingPng(true)
     try {
@@ -467,7 +494,7 @@ export default function FlowDemo() {
         .getPropertyValue('--bg')
         .trim()
 
-      const dataUrl = await elementToPngDataUrl(viewport, {
+      const dataUrl = await elementToPngDataUrl(plottingArea, {
         backgroundColor: bg !== '' ? bg : undefined,
       })
 
