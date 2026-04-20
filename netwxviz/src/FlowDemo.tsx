@@ -62,6 +62,110 @@ function legendColorByHeading(mode: NodeColorMode): string {
   }
 }
 
+function copyComputedStyles(
+  source: Element,
+  target: Element,
+  include: (name: string) => boolean,
+) {
+  const computed = getComputedStyle(source)
+  for (let i = 0; i < computed.length; i++) {
+    const name = computed.item(i)
+    if (!include(name)) continue
+    target.setAttribute('style', `${target.getAttribute('style') ?? ''}${name}:${computed.getPropertyValue(name)};`)
+  }
+}
+
+function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
+  const clone = node.cloneNode(true) as HTMLElement
+
+  const includeStyle = (name: string) => {
+    if (name.startsWith('-')) return false
+    return (
+      name.startsWith('background') ||
+      name.startsWith('border') ||
+      name.startsWith('box') ||
+      name.startsWith('color') ||
+      name.startsWith('display') ||
+      name.startsWith('filter') ||
+      name.startsWith('flex') ||
+      name.startsWith('font') ||
+      name.startsWith('gap') ||
+      name.startsWith('height') ||
+      name.startsWith('justify') ||
+      name.startsWith('left') ||
+      name.startsWith('letter') ||
+      name.startsWith('line') ||
+      name.startsWith('margin') ||
+      name.startsWith('max') ||
+      name.startsWith('min') ||
+      name.startsWith('opacity') ||
+      name.startsWith('overflow') ||
+      name.startsWith('padding') ||
+      name.startsWith('position') ||
+      name.startsWith('right') ||
+      name.startsWith('stroke') ||
+      name.startsWith('text') ||
+      name.startsWith('top') ||
+      name.startsWith('transform') ||
+      name.startsWith('visibility') ||
+      name.startsWith('width') ||
+      name.startsWith('z-index')
+    )
+  }
+
+  const sourceEls = [node, ...Array.from(node.querySelectorAll('*'))]
+  const targetEls = [clone, ...Array.from(clone.querySelectorAll('*'))]
+  for (let i = 0; i < sourceEls.length; i++) {
+    const s = sourceEls[i]
+    const t = targetEls[i]
+    if (!t) continue
+    copyComputedStyles(s, t, includeStyle)
+  }
+
+  return clone
+}
+
+async function elementToPngDataUrl(el: HTMLElement, opts?: { backgroundColor?: string }) {
+  const rect = el.getBoundingClientRect()
+  const width = Math.max(1, Math.round(rect.width))
+  const height = Math.max(1, Math.round(rect.height))
+
+  const clone = deepCloneWithInlineStyles(el)
+  clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml')
+
+  const serialized = new XMLSerializer().serializeToString(clone)
+  const bg = opts?.backgroundColor ? `<rect width="100%" height="100%" fill="${opts.backgroundColor}"/>` : ''
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  ${bg}
+  <foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject>
+</svg>`
+
+  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  try {
+    const img = new Image()
+    img.decoding = 'async'
+    img.src = url
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve()
+      img.onerror = () => reject(new Error('Failed to render image'))
+    })
+
+    const canvas = document.createElement('canvas')
+    const ratio = Math.min(2, window.devicePixelRatio || 1)
+    canvas.width = Math.round(width * ratio)
+    canvas.height = Math.round(height * ratio)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas not available')
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
+    ctx.drawImage(img, 0, 0)
+    return canvas.toDataURL('image/png')
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 type GraphConfig = {
   curvature: 'bezier' | 'smoothstep' | 'straight'
   edgeWidth: number
@@ -199,6 +303,15 @@ export default function FlowDemo() {
   const [chunksCount, setChunksCount] = useState(1)
   const [splitsCount, setSplitsCount] = useState(1)
   const [showLegend, setShowLegend] = useState(false)
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null)
+  const [flowReady, setFlowReady] = useState(false)
+  const flowCanvasRef = useRef<HTMLDivElement | null>(null)
+  const [exportingPng, setExportingPng] = useState(false)
+
+  const resetFlow = useCallback(() => {
+    setFlowReady(false)
+    rfInstanceRef.current = null
+  }, [])
 
   const dimensionParams = useMemo((): DimensionParams => {
     return {
@@ -279,12 +392,14 @@ export default function FlowDemo() {
         const text = await file.text()
         const rows = parseJobsFileJson(text)
         setJobRows(rows)
+        if (rows.length === 0) resetFlow()
       } catch (err) {
         setJobRows(null)
+        resetFlow()
         setError(err instanceof Error ? err.message : 'Failed to read jobs file')
       }
     },
-    [],
+    [resetFlow],
   )
 
   const loadSample = useCallback(async () => {
@@ -295,23 +410,24 @@ export default function FlowDemo() {
       const res = await fetch(SAMPLE_URL, { cache: 'no-store' })
       if (!res.ok) throw new Error(`Could not load ${SAMPLE_URL} (${res.status})`)
       const text = await res.text()
-      setJobRows(parseJobsFileJson(text))
+      const rows = parseJobsFileJson(text)
+      setJobRows(rows)
+      if (rows.length === 0) resetFlow()
     } catch (err) {
       setJobRows(null)
+      resetFlow()
       setError(err instanceof Error ? err.message : 'Failed to load sample')
     } finally {
       setLoadingSample(false)
     }
-  }, [])
+  }, [resetFlow])
 
   const clearGraph = useCallback(() => {
     setJobRows(null)
     setFileLabel('')
     setError(null)
-  }, [])
-
-  const rfInstanceRef = useRef<ReactFlowInstance | null>(null)
-  const [flowReady, setFlowReady] = useState(false)
+    resetFlow()
+  }, [resetFlow])
 
   const fitGraphView = useCallback(() => {
     rfInstanceRef.current?.fitView({
@@ -320,12 +436,41 @@ export default function FlowDemo() {
     })
   }, [])
 
-  useEffect(() => {
-    if (jobRows === null || jobRows.length === 0) {
-      setFlowReady(false)
-      rfInstanceRef.current = null
+  const downloadPng = useCallback(async () => {
+    if (jobRows === null || nodes.length === 0) return
+    const root = flowCanvasRef.current
+    const viewport =
+      root?.querySelector<HTMLElement>('.react-flow__viewport') ??
+      root?.querySelector<HTMLElement>('.xy-flow__viewport') ??
+      root
+
+    if (!viewport) return
+
+    setExportingPng(true)
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+
+      const bg = getComputedStyle(document.documentElement)
+        .getPropertyValue('--bg')
+        .trim()
+
+      const dataUrl = await elementToPngDataUrl(viewport, {
+        backgroundColor: bg !== '' ? bg : undefined,
+      })
+
+      const base =
+        (fileLabel || 'workflow')
+          .replace(/\s+\(.*\)\s*$/, '')
+          .replace(/\.[^.]+$/, '') || 'workflow'
+
+      const a = document.createElement('a')
+      a.href = dataUrl
+      a.download = `${base}.png`
+      a.click()
+    } finally {
+      setExportingPng(false)
     }
-  }, [jobRows])
+  }, [fileLabel, jobRows, nodes.length])
 
   useEffect(() => {
     if (
@@ -572,15 +717,6 @@ export default function FlowDemo() {
           <button
             type="button"
             className="flow-toolbar-btn"
-            onClick={fitGraphView}
-            disabled={jobRows === null || nodes.length === 0}
-            title="Fit and center the graph in the view"
-          >
-            Center
-          </button>
-          <button
-            type="button"
-            className="flow-toolbar-btn flow-toolbar-btn--ghost"
             onClick={clearGraph}
             disabled={jobRows === null}
           >
@@ -709,6 +845,29 @@ export default function FlowDemo() {
       ) : null}
 
       <div className="flow-canvas-wrap">
+        <div
+          className="flow-canvas-actions"
+          data-hidden={exportingPng ? 'true' : 'false'}
+        >
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={fitGraphView}
+            disabled={jobRows === null || nodes.length === 0}
+            title="Fit and center the graph in the view"
+          >
+            Center
+          </button>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={downloadPng}
+            disabled={jobRows === null || nodes.length === 0 || exportingPng}
+            title="Download the workflow picture as a PNG"
+          >
+            {exportingPng ? 'Downloading…' : 'Download PNG'}
+          </button>
+        </div>
         {jobRows === null ? (
           <div
             style={{
@@ -738,7 +897,7 @@ export default function FlowDemo() {
             The file is a valid JSON array but contains no job objects.
           </div>
         ) : (
-          <div className="flow-canvas-inner">
+          <div className="flow-canvas-inner" ref={flowCanvasRef}>
             <ReactFlow
               style={{ width: '100%', height: '100%' }}
               nodes={nodes}
