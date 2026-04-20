@@ -409,17 +409,21 @@ export default function FlowDemo() {
         showLabel: showJobNames,
       },
     }))
-    const styledEdges: Edge<JobEdgeData>[] = built.edges.map((e) => {
+    const styledEdges: Edge<JobEdgeData>[] = built.edges
+      // TODO(self-loops): self-loop edges (source === target) are intentionally hidden for now.
+      // Re-enable only with a dedicated edge renderer and sensible arrow sizing/geometry.
+      .filter((e) => e.source !== e.target)
+      .map((e) => {
       const d = e.data
       const crossChunk = edgeCrossesChunkBoundaries(e.source, e.target, d)
       return {
         ...e,
-        type: config.curvature,
+          type: config.curvature,
         animated: config.edgeAnimated,
-        markerEnd: { type: MarkerType.ArrowClosed, color: palette.edgeColor },
+          markerEnd: { type: MarkerType.ArrowClosed, color: palette.edgeColor },
         style: {
           stroke: palette.edgeColor,
-          strokeWidth: config.edgeWidth,
+            strokeWidth: config.edgeWidth,
           ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
         },
       }
