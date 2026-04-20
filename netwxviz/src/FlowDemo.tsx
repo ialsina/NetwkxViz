@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
 } from 'react'
+import { flushSync } from 'react-dom'
 import {
   Background,
   BackgroundVariant,
@@ -167,7 +168,10 @@ function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
   return clone
 }
 
-async function elementToPngDataUrl(el: HTMLElement, opts?: { backgroundColor?: string }) {
+async function elementToPngDataUrl(
+  el: HTMLElement,
+  opts?: { backgroundColor?: string; dpi?: number },
+) {
   const rect = el.getBoundingClientRect()
   const width = Math.max(1, Math.round(rect.width))
   const height = Math.max(1, Math.round(rect.height))
@@ -195,8 +199,7 @@ async function elementToPngDataUrl(el: HTMLElement, opts?: { backgroundColor?: s
     })
 
     const canvas = document.createElement('canvas')
-    // Higher export resolution than on-screen. Cap to avoid huge canvases for very large graphs.
-    const ratio = Math.min(6, Math.max(3, (window.devicePixelRatio || 1) * 2))
+    const ratio = opts?.dpi ?? Math.min(6, Math.max(3, (window.devicePixelRatio || 1) * 2))
     canvas.width = Math.round(width * ratio)
     canvas.height = Math.round(height * ratio)
     const ctx = canvas.getContext('2d')
@@ -207,6 +210,350 @@ async function elementToPngDataUrl(el: HTMLElement, opts?: { backgroundColor?: s
   } finally {
     URL.revokeObjectURL(url)
   }
+}
+
+// ── Animation types & helpers ────────────────────────────────────────────────
+
+type AnimKeyframe = {
+  viewport: { x: number; y: number; zoom: number }
+  inactiveNodeIds: Set<string>
+}
+
+type AnimCurve = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'cubic'
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t
+}
+
+function applyEasing(curve: AnimCurve, t: number): number {
+  switch (curve) {
+    case 'linear':     return t
+    case 'ease-in':    return t * t
+    case 'ease-out':   return 1 - (1 - t) * (1 - t)
+    case 'ease-in-out':
+      return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2
+    case 'cubic':
+      return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2
+  }
+}
+
+function u16le(n: number): number[] {
+  return [n & 0xff, (n >> 8) & 0xff]
+}
+
+function clampByte(n: number): number {
+  return Math.max(0, Math.min(255, Math.round(n)))
+}
+
+function makeFixed256ColorTable(): Uint8Array {
+  // 3-3-2 quantization: r(3 bits), g(3 bits), b(2 bits) = 256 colors
+  const table = new Uint8Array(256 * 3)
+  for (let i = 0; i < 256; i++) {
+    const r3 = (i >> 5) & 0x7
+    const g3 = (i >> 2) & 0x7
+    const b2 = i & 0x3
+    const r = clampByte((r3 * 255) / 7)
+    const g = clampByte((g3 * 255) / 7)
+    const b = clampByte((b2 * 255) / 3)
+    table[i * 3 + 0] = r
+    table[i * 3 + 1] = g
+    table[i * 3 + 2] = b
+  }
+  return table
+}
+
+function rgbaToFixed332Indices(img: ImageData): Uint8Array {
+  const { data, width, height } = img
+  const out = new Uint8Array(width * height)
+  for (let p = 0, i = 0; p < out.length; p++, i += 4) {
+    const r = data[i]
+    const g = data[i + 1]
+    const b = data[i + 2]
+    // Ignore alpha; the rendered frames should already have background baked in.
+    const r3 = r >> 5
+    const g3 = g >> 5
+    const b2 = b >> 6
+    out[p] = (r3 << 5) | (g3 << 2) | b2
+  }
+  return out
+}
+
+// LZW encoder using a flat Uint16Array[4096*256] children dictionary.
+// children[parentCode*256 + symbol] = childCode, 0xFFFF = absent.
+// Avoids all string allocations and Map lookups of the naive approach.
+function lzwEncode8BitFast(indices: Uint8Array): Uint8Array {
+  const clearCode = 256
+  const endCode = 257
+  const children = new Uint16Array(4096 * 256).fill(0xffff)
+  let nextCode = endCode + 1
+  let codeSize = 9
+  const out: number[] = []
+  let cur = 0
+  let curBits = 0
+
+  const writeCode = (code: number) => {
+    cur |= code << curBits
+    curBits += codeSize
+    while (curBits >= 8) { out.push(cur & 0xff); cur >>= 8; curBits -= 8 }
+  }
+  const resetDict = () => {
+    children.fill(0xffff)
+    nextCode = endCode + 1
+    codeSize = 9
+  }
+
+  writeCode(clearCode)
+  let w = indices[0] ?? 0
+  for (let i = 1; i < indices.length; i++) {
+    const k = indices[i]
+    const slot = w * 256 + k
+    const child = children[slot]
+    if (child !== 0xffff) { w = child; continue }
+    writeCode(w)
+    if (nextCode < 4096) {
+      children[slot] = nextCode
+      if (nextCode === (1 << codeSize) && codeSize < 12) codeSize++
+      nextCode++
+    } else {
+      writeCode(clearCode)
+      resetDict()
+    }
+    w = k
+  }
+  writeCode(w)
+  writeCode(endCode)
+  if (curBits > 0) out.push(cur & 0xff)
+  return new Uint8Array(out)
+}
+
+// Wraps raw LZW bytes in GIF sub-blocks (max 255 bytes each) + terminator.
+function toSubBlocks(data: Uint8Array): Uint8Array {
+  const rem = data.length % 255
+  const size = Math.floor(data.length / 255) * 256 + (rem > 0 ? rem + 1 : 0) + 1
+  const out = new Uint8Array(size)
+  let ri = 0, wi = 0
+  while (ri < data.length) {
+    const n = Math.min(255, data.length - ri)
+    out[wi++] = n
+    out.set(data.subarray(ri, ri + n), wi)
+    wi += n; ri += n
+  }
+  out[wi] = 0
+  return out
+}
+
+// ── Canvas-based animation renderer ──────────────────────────────────────────
+// Replaces the DOM→SVG→Canvas pipeline: extracts data ONCE, draws per frame
+// with pure canvas2D. No React re-renders, no style traversal, no rAF waits.
+
+type AnimRenderData = {
+  containerW: number
+  containerH: number
+  edges: Array<{
+    pathD: string
+    isDashed: boolean
+    source: string
+    target: string
+    baseStroke: string
+  }>
+  nodes: Array<{
+    id: string
+    x: number
+    y: number
+    w: number
+    h: number
+    color: string
+    label: string
+    labelLine2: string | null
+    showLabel: boolean
+  }>
+}
+
+function extractAnimRenderData(
+  plottingArea: HTMLElement,
+  reactNodes: DotNodeType[],
+  reactEdges: Edge<JobEdgeData>[],
+): AnimRenderData {
+  const rect = plottingArea.getBoundingClientRect()
+
+  // Extract SVG path `d` attributes from the DOM (in graph coordinates, inside viewport).
+  const edgePathMap = new Map<string, { pathD: string; isDashed: boolean }>()
+  plottingArea.querySelectorAll<Element>('[data-id]').forEach((el) => {
+    const pathEl = el.querySelector<SVGPathElement>('path')
+    if (!pathEl) return
+    const d = pathEl.getAttribute('d')
+    if (!d) return
+    const id = el.getAttribute('data-id') ?? ''
+    const dashes = pathEl.getAttribute('stroke-dasharray') ?? pathEl.style.strokeDasharray ?? ''
+    edgePathMap.set(id, { pathD: d, isDashed: dashes !== '' && dashes !== 'none' })
+  })
+
+  const edges = reactEdges
+    .filter((e) => e.source !== e.target)
+    .map((e) => ({
+      pathD: edgePathMap.get(e.id)?.pathD ?? '',
+      isDashed: edgePathMap.get(e.id)?.isDashed ?? false,
+      source: e.source,
+      target: e.target,
+      baseStroke: typeof e.style?.stroke === 'string' ? e.style.stroke : '#888',
+    }))
+    .filter((e) => e.pathD !== '')
+
+  const nodes = reactNodes.map((n) => {
+    const anyN = n as unknown as { measured?: { width?: number; height?: number } }
+    return {
+      id: n.id,
+      x: n.position.x,
+      y: n.position.y,
+      w: anyN.measured?.width ?? 36,
+      h: anyN.measured?.height ?? 36,
+      color: n.data.color ?? '#aa3bff',
+      label: String(n.data.label ?? ''),
+      labelLine2: n.data.labelLine2 ? String(n.data.labelLine2) : null,
+      showLabel: !!(n.data as unknown as { showLabel?: boolean }).showLabel,
+    }
+  })
+
+  return { containerW: Math.round(rect.width), containerH: Math.round(rect.height), edges, nodes }
+}
+
+const ANIM_DOT_R = 9    // half of the 18px circle diameter
+const ANIM_DOT_PAD = 4  // top padding in DotNode before the circle center
+const MUTED_EDGE_COLOR = 'rgba(148,163,184,0.55)'
+
+// Parse the last cubic bezier segment of a React Flow edge path (uppercase C = absolute coords).
+function arrowheadFromPath(d: string): { cp2x: number; cp2y: number; tx: number; ty: number } | null {
+  const re = /C\s*([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)/g
+  let last: RegExpExecArray | null = null
+  let m: RegExpExecArray | null = null
+  while ((m = re.exec(d)) !== null) last = m
+  if (!last) return null
+  return { cp2x: +last[3], cp2y: +last[4], tx: +last[5], ty: +last[6] }
+}
+
+function renderNodeLabelOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  label: string,
+  line2: string | null,
+  cx: number,
+  dotBottom: number,
+  alpha: number,
+  textColor: string,
+) {
+  const padH = 8, padV = 4, r = 10, fs1 = 11, fs2 = 10, lh1 = 14, lh2 = 13
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.font = `600 ${fs1}px system-ui,'Segoe UI',sans-serif`
+  const w1 = ctx.measureText(label).width
+  let w2 = 0
+  if (line2) { ctx.font = `500 ${fs2}px system-ui,'Segoe UI',sans-serif`; w2 = ctx.measureText(line2).width }
+  const pillW = Math.max(w1, w2) + padH * 2
+  const pillH = (line2 ? lh1 + lh2 + 2 : lh1) + padV * 2
+  const pillX = cx - pillW / 2, pillY = dotBottom + 4
+  ctx.fillStyle = 'rgba(0,0,0,0.30)'
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  if (typeof (ctx as CanvasRenderingContext2D & { roundRect?: unknown }).roundRect === 'function') {
+    ;(ctx as CanvasRenderingContext2D & { roundRect: (x: number, y: number, w: number, h: number, r: number) => void })
+      .roundRect(pillX, pillY, pillW, pillH, r)
+  } else {
+    ctx.moveTo(pillX + r, pillY)
+    ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, r)
+    ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, r)
+    ctx.arcTo(pillX, pillY + pillH, pillX, pillY, r)
+    ctx.arcTo(pillX, pillY, pillX + pillW, pillY, r)
+    ctx.closePath()
+  }
+  ctx.fill(); ctx.stroke()
+  ctx.fillStyle = textColor
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top'
+  ctx.font = `600 ${fs1}px system-ui,'Segoe UI',sans-serif`
+  ctx.fillText(label, cx, pillY + padV)
+  if (line2) {
+    ctx.font = `500 ${fs2}px system-ui,'Segoe UI',sans-serif`
+    ctx.globalAlpha = alpha * 0.92
+    ctx.fillText(line2, cx, pillY + padV + lh1 + 2)
+  }
+  ctx.restore()
+}
+
+// Draws one animation frame onto the provided canvas (which is reused across frames).
+function renderAnimFrame(
+  canvas: HTMLCanvasElement,
+  opts: {
+    data: AnimRenderData
+    viewport: { x: number; y: number; zoom: number }
+    getInactiveP: (id: string) => number
+    dpi: number
+    backgroundColor: string
+    showLabels: boolean
+    textColor: string
+  },
+): ImageData {
+  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor } = opts
+  const fw = Math.max(1, Math.round(data.containerW * dpi))
+  const fh = Math.max(1, Math.round(data.containerH * dpi))
+  if (canvas.width !== fw) canvas.width = fw
+  if (canvas.height !== fh) canvas.height = fh
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+
+  ctx.fillStyle = backgroundColor || '#16171d'
+  ctx.fillRect(0, 0, fw, fh)
+  ctx.save()
+  ctx.scale(dpi, dpi)
+  ctx.translate(viewport.x, viewport.y)
+  ctx.scale(viewport.zoom, viewport.zoom)
+
+  // ── Edges ──────────────────────────────────────────────────────────────
+  for (const edge of data.edges) {
+    const ip = Math.max(getInactiveP(edge.source), getInactiveP(edge.target))
+    const stroke = ip > 0.5 ? MUTED_EDGE_COLOR : edge.baseStroke
+    ctx.save()
+    ctx.strokeStyle = stroke
+    ctx.lineWidth = 1.5
+    ctx.globalAlpha = lerp(1, 0.55, ip)
+    if (edge.isDashed) ctx.setLineDash([6, 5])
+    ctx.stroke(new Path2D(edge.pathD))
+    ctx.setLineDash([])
+    const ah = arrowheadFromPath(edge.pathD)
+    if (ah) {
+      const dx = ah.tx - ah.cp2x, dy = ah.ty - ah.cp2y
+      const len = Math.sqrt(dx * dx + dy * dy)
+      if (len > 0.5) {
+        const nx = dx / len, ny = dy / len, sz = 7
+        ctx.fillStyle = stroke
+        ctx.beginPath()
+        ctx.moveTo(ah.tx, ah.ty)
+        ctx.lineTo(ah.tx - nx * sz + ny * sz * 0.5, ah.ty - ny * sz - nx * sz * 0.5)
+        ctx.lineTo(ah.tx - nx * sz - ny * sz * 0.5, ah.ty - ny * sz + nx * sz * 0.5)
+        ctx.closePath()
+        ctx.fill()
+      }
+    }
+    ctx.restore()
+  }
+
+  // ── Nodes ──────────────────────────────────────────────────────────────
+  for (const node of data.nodes) {
+    const ip = getInactiveP(node.id)
+    const cx = node.x + node.w / 2
+    const cy = node.y + ANIM_DOT_PAD + ANIM_DOT_R
+    ctx.save()
+    ctx.globalAlpha = lerp(1, 0.42, ip)
+    if (ip > 0.001) ctx.filter = `grayscale(${ip})`
+    ctx.fillStyle = node.color
+    ctx.beginPath()
+    ctx.arc(cx, cy, ANIM_DOT_R, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+    if (opts.showLabels && node.showLabel && node.label) {
+      renderNodeLabelOnCanvas(ctx, node.label, node.labelLine2, cx, cy + ANIM_DOT_R, lerp(1, 0.55, ip), textColor)
+    }
+  }
+
+  ctx.restore()
+  return ctx.getImageData(0, 0, fw, fh)
 }
 
 type GraphConfig = {
@@ -229,6 +576,9 @@ const DotNode = ({
   const a11yLabel =
     line2 != null && line2 !== '' ? `${data.label}\n${line2}` : data.label
   const inactive = (data as unknown as { inactive?: boolean }).inactive === true
+  // inactiveProgress (0–1) enables smooth animation; falls back to boolean inactive flag
+  const rawProgress = (data as unknown as { inactiveProgress?: number }).inactiveProgress
+  const inactiveP = rawProgress !== undefined ? rawProgress : (inactive ? 1 : 0)
 
   const w = width ?? 36
   const h = height ?? 36
@@ -271,9 +621,9 @@ const DotNode = ({
             inset: 0,
             borderRadius: 999,
             background: data.color ?? 'var(--accent)',
-            boxShadow: inactive ? 'none' : '0 6px 18px rgba(0,0,0,0.18)',
-            opacity: inactive ? 0.42 : 1,
-            filter: inactive ? 'grayscale(1)' : 'none',
+            boxShadow: inactiveP > 0.5 ? 'none' : '0 6px 18px rgba(0,0,0,0.18)',
+            opacity: lerp(1, 0.42, inactiveP),
+            filter: `grayscale(${inactiveP})`,
           }}
         />
       </div>
@@ -298,7 +648,7 @@ const DotNode = ({
             flexDirection: 'column',
             alignItems: 'center',
             gap: 2,
-            opacity: inactive ? 0.55 : 1,
+            opacity: lerp(1, 0.55, inactiveP),
           }}
         >
           <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
@@ -369,6 +719,17 @@ export default function FlowDemo() {
   const [interactionMode, setInteractionMode] = useState<'pan' | 'select'>('pan')
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(() => new Set())
   const [inactiveNodeIds, setInactiveNodeIds] = useState<Set<string>>(() => new Set())
+
+  const [exportDpi, setExportDpi] = useState(3)
+  const [mediaMode, setMediaMode] = useState<'none' | 'download' | 'animate'>('none')
+  const [animStartFrame, setAnimStartFrame] = useState<AnimKeyframe | null>(null)
+  const [animEndFrame, setAnimEndFrame] = useState<AnimKeyframe | null>(null)
+  const [animCurve, setAnimCurve] = useState<AnimCurve>('ease-in-out')
+  const [animDurationSec, setAnimDurationSec] = useState(5)
+  const [animFps, setAnimFps] = useState(24)
+  const [animDpi, setAnimDpi] = useState(2)
+  const [animating, setAnimating] = useState(false)
+  const [animProgress, setAnimProgress] = useState(0)
 
   const resetFlow = useCallback(() => {
     setFlowReady(false)
@@ -644,6 +1005,7 @@ export default function FlowDemo() {
 
       const dataUrl = await elementToPngDataUrl(plottingArea, {
         backgroundColor: bg !== '' ? bg : undefined,
+        dpi: exportDpi,
       })
 
       const base =
@@ -667,7 +1029,140 @@ export default function FlowDemo() {
       setSelectedNodeIds(prevSelectedIds)
       setExportingPng(false)
     }
-  }, [fileLabel, jobRows, nodes, setNodes])
+  }, [exportDpi, fileLabel, jobRows, nodes, setNodes])
+
+  const captureKeyframe = useCallback((): AnimKeyframe | null => {
+    const vp = rfInstanceRef.current?.getViewport()
+    if (!vp) return null
+    return { viewport: vp, inactiveNodeIds: new Set(inactiveNodeIds) }
+  }, [inactiveNodeIds])
+
+  const runAnimation = useCallback(async () => {
+    if (!animStartFrame || !animEndFrame) return
+    const root = flowCanvasRef.current
+    const plottingArea =
+      root?.querySelector<HTMLElement>('.react-flow') ??
+      root?.querySelector<HTMLElement>('.xy-flow') ??
+      root
+    if (!plottingArea) return
+
+    const N = Math.max(2, Math.round(animDurationSec * animFps))
+    const bg =
+      getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#16171d'
+    const textH =
+      getComputedStyle(document.documentElement).getPropertyValue('--text-h').trim() || '#f3f4f6'
+
+    setAnimating(true)
+    setAnimProgress(0)
+
+    try {
+      // ── Extract render data once (no per-frame DOM work) ───────────────
+      const renderData = extractAnimRenderData(plottingArea, nodes, edges)
+      const fw = Math.max(1, Math.round(renderData.containerW * animDpi))
+      const fh = Math.max(1, Math.round(renderData.containerH * animDpi))
+
+      // Reuse a single canvas across all frames (avoids GC pressure).
+      const frameCanvas = document.createElement('canvas')
+      frameCanvas.width = fw
+      frameCanvas.height = fh
+
+      // Pre-build the GIF header as a single Uint8Array.
+      const enc = new TextEncoder()
+      const gct = makeFixed256ColorTable()
+      const gifHeader = new Uint8Array([
+        ...enc.encode('GIF89a'),
+        ...u16le(fw), ...u16le(fh),
+        0b11110111, 0, 0,        // GCT present, 256 colors, bg=0, PAR=0
+        ...Array.from(gct),
+        // Netscape 2.0 loop extension (infinite loop)
+        0x21, 0xff, 0x0b, ...enc.encode('NETSCAPE2.0'), 0x03, 0x01, 0x00, 0x00, 0x00,
+      ])
+      const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
+      const frameHeader = new Uint8Array([
+        // Graphic Control Extension
+        0x21, 0xf9, 0x04, 0x00, ...u16le(delayCs), 0x00, 0x00,
+        // Image Descriptor
+        0x2c, ...u16le(0), ...u16le(0), ...u16le(fw), ...u16le(fh), 0x00,
+        // LZW min code size
+        0x08,
+      ])
+
+      // ── Single loop: render + quantize + LZW encode per frame ──────────
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const gifChunks: any[] = [gifHeader]
+      for (let i = 0; i < N; i++) {
+        const t = N > 1 ? i / (N - 1) : 0
+        const te = applyEasing(animCurve, t)
+        const vp = {
+          x: lerp(animStartFrame.viewport.x, animEndFrame.viewport.x, te),
+          y: lerp(animStartFrame.viewport.y, animEndFrame.viewport.y, te),
+          zoom: lerp(animStartFrame.viewport.zoom, animEndFrame.viewport.zoom, te),
+        }
+        const getInactiveP = (nodeId: string): number => {
+          const inStart = animStartFrame.inactiveNodeIds.has(nodeId)
+          const inEnd = animEndFrame.inactiveNodeIds.has(nodeId)
+          if (inStart && inEnd) return 1
+          if (!inStart && !inEnd) return 0
+          return inStart ? 1 - te : te
+        }
+
+        const imageData = renderAnimFrame(frameCanvas, {
+          data: renderData, viewport: vp, getInactiveP,
+          dpi: animDpi, backgroundColor: bg, showLabels: showJobNames, textColor: textH,
+        })
+
+        gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixed332Indices(imageData))))
+
+        setAnimProgress((i + 1) / N)
+        // Yield every 8 frames so the progress bar can update
+        if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
+      }
+
+      gifChunks.push(new Uint8Array([0x3b])) // GIF Trailer
+      const blob = new Blob(gifChunks, { type: 'image/gif' })
+
+      const base =
+        (fileLabel || 'workflow')
+          .replace(/\s+\(.*\)\s*$/, '')
+          .replace(/\.[^.]+$/, '') || 'workflow'
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${base}-animation.gif`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      // Restore viewport + node states to the end frame
+      rfInstanceRef.current?.setViewport(animEndFrame.viewport)
+      flushSync(() => {
+        setNodes((prev) =>
+          prev.map((n) => {
+            const inEnd = animEndFrame.inactiveNodeIds.has(n.id)
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { inactiveProgress: _ip, ...restData } = n.data as typeof n.data & {
+              inactiveProgress?: number
+            }
+            return { ...n, data: { ...restData, inactive: inEnd } }
+          }),
+        )
+        setInactiveNodeIds(new Set(animEndFrame.inactiveNodeIds))
+      })
+      setAnimating(false)
+      setAnimProgress(0)
+    }
+  }, [
+    animCurve,
+    animDpi,
+    animDurationSec,
+    animEndFrame,
+    animFps,
+    animStartFrame,
+    edges,
+    fileLabel,
+    nodes,
+    setNodes,
+    showJobNames,
+  ])
 
   useEffect(() => {
     if (
@@ -1023,7 +1518,10 @@ export default function FlowDemo() {
       ) : null}
 
       <div className="flow-canvas-wrap">
-        <div className="flow-canvas-palette" data-hidden={exportingPng ? 'true' : 'false'}>
+        <div
+          className="flow-canvas-palette"
+          data-hidden={exportingPng || animating ? 'true' : 'false'}
+        >
           <button
             type="button"
             className="flow-canvas-action-btn"
@@ -1111,17 +1609,200 @@ export default function FlowDemo() {
           >
             LEGEND
           </button>
-          <span aria-hidden="true" className="flow-canvas-palette-sep" />
-          <button
-            type="button"
-            className="flow-canvas-action-btn"
-            onClick={downloadPng}
-            disabled={jobRows === null || nodes.length === 0 || exportingPng}
-            title="Download the workflow picture as a PNG"
-          >
-            {exportingPng ? 'Downloading…' : 'DOWNLOAD'}
-          </button>
         </div>
+
+        {/* ── Media toolbar (bottom-right) ─────────────────────────────── */}
+        <div
+          className="flow-media-palette"
+          data-hidden={exportingPng || animating ? 'true' : 'false'}
+        >
+          {mediaMode === 'none' ? (
+            <>
+              <button
+                type="button"
+                className="flow-canvas-action-btn"
+                onClick={() => setMediaMode('download')}
+                disabled={jobRows === null || nodes.length === 0}
+                title="Download the workflow picture as a PNG"
+              >
+                DOWNLOAD
+              </button>
+              <button
+                type="button"
+                className="flow-canvas-action-btn"
+                onClick={() => setMediaMode('animate')}
+                disabled={jobRows === null || nodes.length === 0}
+                title="Export a WebM animation between two keyframes"
+              >
+                ANIMATE
+              </button>
+            </>
+          ) : mediaMode === 'download' ? (
+            <>
+              <div className="flow-media-field">
+                <span className="flow-media-label">DPI</span>
+                <input
+                  type="number"
+                  className="flow-media-input"
+                  min={1}
+                  max={999}
+                  step={1}
+                  value={exportDpi}
+                  onChange={(e) =>
+                    setExportDpi(Math.max(1, Math.min(999, Number(e.target.value))))
+                  }
+                  title="Export pixel density multiplier (1–8)"
+                  aria-label="Export DPI"
+                />
+              </div>
+              <button
+                type="button"
+                className="flow-canvas-action-btn flow-canvas-action-btn--accent"
+                onClick={downloadPng}
+                disabled={exportingPng}
+                title="Download PNG"
+              >
+                {exportingPng ? '…' : 'Go'}
+              </button>
+              <button
+                type="button"
+                className="flow-canvas-action-btn"
+                onClick={() => setMediaMode('none')}
+                disabled={exportingPng}
+                title="Back"
+              >
+                Back
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={`flow-canvas-action-btn${animStartFrame ? ' flow-canvas-action-btn--set' : ''}`}
+                onClick={() => {
+                  const kf = captureKeyframe()
+                  if (kf) setAnimStartFrame(kf)
+                }}
+                title={animStartFrame ? 'Start frame set — click to re-capture' : 'Capture start frame (current viewport + node states)'}
+              >
+                SET START{animStartFrame ? ' ✓' : ''}
+              </button>
+              <button
+                type="button"
+                className={`flow-canvas-action-btn${animEndFrame ? ' flow-canvas-action-btn--set' : ''}`}
+                onClick={() => {
+                  const kf = captureKeyframe()
+                  if (kf) setAnimEndFrame(kf)
+                }}
+                title={animEndFrame ? 'End frame set — click to re-capture' : 'Capture end frame (current viewport + node states)'}
+              >
+                SET END{animEndFrame ? ' ✓' : ''}
+              </button>
+              <span aria-hidden="true" className="flow-canvas-palette-sep" />
+              <div className="flow-media-field">
+                <span className="flow-media-label">Curve</span>
+                <select
+                  className="flow-toolbar-select flow-media-select"
+                  value={animCurve}
+                  onChange={(e) => setAnimCurve(e.target.value as AnimCurve)}
+                  aria-label="Easing curve"
+                >
+                  <option value="linear">Linear</option>
+                  <option value="ease-in">Ease in</option>
+                  <option value="ease-out">Ease out</option>
+                  <option value="ease-in-out">Ease in-out</option>
+                  <option value="cubic">Cubic</option>
+                </select>
+              </div>
+              <div className="flow-media-field">
+                <span className="flow-media-label">DPI</span>
+                <input
+                  type="number"
+                  className="flow-media-input"
+                  min={1}
+                  max={999}
+                  step={1}
+                  value={animDpi}
+                  onChange={(e) => setAnimDpi(Math.max(1, Math.min(999, Number(e.target.value))))}
+                  title="Animation frame pixel density"
+                  aria-label="Animation DPI"
+                />
+              </div>
+              <div className="flow-media-field">
+                <span className="flow-media-label">Duration</span>
+                <input
+                  type="number"
+                  className="flow-media-input"
+                  min={1}
+                  max={999}
+                  step={1}
+                  value={animDurationSec}
+                  onChange={(e) =>
+                    setAnimDurationSec(Math.max(1, Math.min(999, Number(e.target.value))))
+                  }
+                  title="Animation duration in seconds"
+                  aria-label="Animation duration (s)"
+                />
+              </div>
+              <div className="flow-media-field">
+                <span className="flow-media-label">FPS</span>
+                <input
+                  type="number"
+                  className="flow-media-input"
+                  min={1}
+                  max={999}
+                  step={1}
+                  value={animFps}
+                  onChange={(e) =>
+                    setAnimFps(Math.max(1, Math.min(999, Number(e.target.value))))
+                  }
+                  title="Frames per second"
+                  aria-label="Animation FPS"
+                />
+              </div>
+              <span aria-hidden="true" className="flow-canvas-palette-sep" />
+              <button
+                type="button"
+                className="flow-canvas-action-btn flow-canvas-action-btn--accent"
+                onClick={runAnimation}
+                disabled={!animStartFrame || !animEndFrame || animating}
+                title={
+                  !animStartFrame || !animEndFrame
+                    ? 'Set both start and end frames first'
+                    : 'Render and download animation'
+                }
+              >
+                Go
+              </button>
+              <button
+                type="button"
+                className="flow-canvas-action-btn"
+                onClick={() => {
+                  setMediaMode('none')
+                  setAnimStartFrame(null)
+                  setAnimEndFrame(null)
+                }}
+                disabled={animating}
+                title="Back"
+              >
+                Back
+              </button>
+            </>
+          )}
+
+          {animating ? (
+            <div
+              className="flow-media-progress"
+              title={`Rendering… ${Math.round(animProgress * 100)}%`}
+            >
+              <div
+                className="flow-media-progress-bar"
+                style={{ width: `${Math.round(animProgress * 100)}%` }}
+              />
+            </div>
+          ) : null}
+        </div>
+
         {jobRows === null ? (
           <div
             style={{
