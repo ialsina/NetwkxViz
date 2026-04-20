@@ -47,18 +47,31 @@ function memberLabelsFromCount(count: number): string[] {
   return Array.from({ length: n }, (_, i) => `member${i + 1}`)
 }
 
-function legendColorByHeading(mode: NodeColorMode): string {
+function legendTitleFromColorBy(mode: NodeColorMode): string {
   switch (mode) {
     case 'name':
-      return 'job name'
+      return 'Job Name'
     case 'frequency':
-      return 'frequency'
+      return 'Frequency'
     case 'platform':
-      return 'PLATFORM'
+      return 'Platforms'
     case 'member':
-      return 'member label'
+      return 'Members'
     case 'chunk':
-      return 'chunk index'
+      return 'Chunks'
+  }
+}
+
+function legendValueLabel(mode: NodeColorMode, e: { key: string; label: string }): string {
+  if (e.key === '__extra__') return e.label
+  switch (mode) {
+    case 'frequency':
+    case 'platform':
+    case 'member':
+    case 'chunk':
+    case 'name':
+    default:
+      return e.key
   }
 }
 
@@ -927,30 +940,10 @@ export default function FlowDemo() {
               {showLegend ? (
                 <Panel position="bottom-left">
                   <div className="flow-legend">
-                    <div className="flow-legend-title">Color key</div>
-                    <p className="flow-legend-meta">
-                      Palette <strong>{palette.label}</strong>
-                      {' · '}
-                      Color by <strong>{legendColorByHeading(nodeColorMode)}</strong>
-                    </p>
+                    <div className="flow-legend-title">
+                      {legendTitleFromColorBy(nodeColorMode)}
+                    </div>
                     <div className="flow-legend-scroll">
-                      <div className="flow-legend-row">
-                        <svg width={40} height={14} aria-hidden>
-                          <line
-                            x1={2}
-                            y1={7}
-                            x2={38}
-                            y2={7}
-                            stroke={palette.edgeColor}
-                            strokeWidth={2}
-                            fill="none"
-                          />
-                        </svg>
-                        <span>
-                          <strong>Edges &amp; arrows</strong> — dependency lines and
-                          arrowheads ({palette.label} theme).
-                        </span>
-                      </div>
                       {colorLegendEntries.map((e) => (
                         <div key={e.key} className="flow-legend-row">
                           <span
@@ -958,7 +951,7 @@ export default function FlowDemo() {
                             style={{ background: e.color }}
                             title={e.label}
                           />
-                          <span>{e.label}</span>
+                          <span>{legendValueLabel(nodeColorMode, e)}</span>
                         </div>
                       ))}
                     </div>
