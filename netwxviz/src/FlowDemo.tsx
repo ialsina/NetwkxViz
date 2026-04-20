@@ -14,6 +14,9 @@ import {
   Panel,
   Position,
   ReactFlow,
+  SelectionMode,
+  useEdgesState,
+  useNodesState,
   type Edge,
   type NodeProps,
   type ReactFlowInstance,
@@ -215,6 +218,7 @@ type GraphConfig = {
 
 const DotNode = ({
   data,
+  selected,
   width,
   height,
   sourcePosition = Position.Bottom,
@@ -224,6 +228,7 @@ const DotNode = ({
   const line2 = data.labelLine2
   const a11yLabel =
     line2 != null && line2 !== '' ? `${data.label}\n${line2}` : data.label
+  const inactive = (data as unknown as { inactive?: boolean }).inactive === true
 
   const w = width ?? 36
   const h = height ?? 36
@@ -252,14 +257,26 @@ const DotNode = ({
       />
       <div
         style={{
+          position: 'relative',
           width: 18,
           height: 18,
           flexShrink: 0,
           borderRadius: 999,
-          background: data.color ?? 'var(--accent)',
-          boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+          boxShadow: selected ? '0 0 0 3px rgba(250, 204, 21, 0.95)' : 'none',
         }}
-      />
+      >
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: 999,
+            background: data.color ?? 'var(--accent)',
+            boxShadow: inactive ? 'none' : '0 6px 18px rgba(0,0,0,0.18)',
+            opacity: inactive ? 0.42 : 1,
+            filter: inactive ? 'grayscale(1)' : 'none',
+          }}
+        />
+      </div>
 
       {showLabel ? (
         <div
@@ -281,6 +298,7 @@ const DotNode = ({
             flexDirection: 'column',
             alignItems: 'center',
             gap: 2,
+            opacity: inactive ? 0.55 : 1,
           }}
         >
           <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
@@ -348,9 +366,15 @@ export default function FlowDemo() {
   const flowCanvasRef = useRef<HTMLDivElement | null>(null)
   const [exportingPng, setExportingPng] = useState(false)
 
+  const [interactionMode, setInteractionMode] = useState<'pan' | 'select'>('pan')
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(() => new Set())
+  const [inactiveNodeIds, setInactiveNodeIds] = useState<Set<string>>(() => new Set())
+
   const resetFlow = useCallback(() => {
     setFlowReady(false)
     rfInstanceRef.current = null
+    setSelectedNodeIds(new Set())
+    setInactiveNodeIds(new Set())
   }, [])
 
   const dimensionParams = useMemo((): DimensionParams => {
@@ -363,9 +387,9 @@ export default function FlowDemo() {
 
   const nodeTypes = useMemo(() => ({ dot: DotNode }), [])
 
-  const { nodes, edges } = useMemo(() => {
+  const { baseNodes, baseEdges } = useMemo(() => {
     if (jobRows === null || jobRows.length === 0) {
-      return { nodes: [] as DotNodeType[], edges: [] as Edge[] }
+      return { baseNodes: [] as DotNodeType[], baseEdges: [] as Edge[] }
     }
     const built = buildExpandedGraphFromJobs(jobRows, dimensionParams, {
       colorMode: nodeColorMode,
@@ -400,7 +424,7 @@ export default function FlowDemo() {
         },
       }
     })
-    return { nodes: laidOut, edges: styledEdges }
+    return { baseNodes: laidOut, baseEdges: styledEdges }
   }, [
     jobRows,
     dimensionParams,
@@ -413,6 +437,48 @@ export default function FlowDemo() {
     config.edgeAnimated,
     config.edgeWidth,
   ])
+
+  const [nodes, setNodes, onNodesChange] = useNodesState<DotNodeType>([])
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<JobEdgeData>>([])
+
+  useEffect(() => {
+    const presentIds = new Set(baseNodes.map((n) => n.id))
+    const nextInactive = new Set([...inactiveNodeIds].filter((id) => presentIds.has(id)))
+    if (nextInactive.size !== inactiveNodeIds.size) setInactiveNodeIds(nextInactive)
+
+    setNodes((prev) => {
+      const prevSelected = new Map<string, boolean>()
+      for (const n of prev) prevSelected.set(n.id, n.selected === true)
+
+      return baseNodes.map((n) => ({
+        ...n,
+        selected: prevSelected.get(n.id) ?? false,
+        data: {
+          ...n.data,
+          inactive: nextInactive.has(n.id),
+        },
+      }))
+    })
+
+    const mutedStroke = 'rgba(148,163,184,0.55)'
+    setEdges(
+      baseEdges.map((e) => {
+        const inactive = nextInactive.has(e.source) || nextInactive.has(e.target)
+        return {
+          ...e,
+          markerEnd: {
+            ...(e.markerEnd ?? { type: MarkerType.ArrowClosed }),
+            color: inactive ? mutedStroke : palette.edgeColor,
+          },
+          style: {
+            ...(e.style ?? {}),
+            stroke: inactive ? mutedStroke : palette.edgeColor,
+            opacity: inactive ? 0.55 : 1,
+          },
+        }
+      }),
+    )
+  }, [baseNodes, baseEdges, inactiveNodeIds, palette.edgeColor, setEdges, setNodes])
 
   const colorLegendEntries = useMemo(
     () => collectExpandedColorLegendEntries(nodes, nodeColorMode),
@@ -476,6 +542,76 @@ export default function FlowDemo() {
     })
   }, [])
 
+  const clearSelection = useCallback(() => {
+    setSelectedNodeIds(new Set())
+    setNodes((nds) =>
+      nds.map((n) => (n.selected ? { ...n, selected: false } : n)),
+    )
+  }, [setNodes])
+
+  const onSelectionChange = useCallback((p: { nodes?: Array<{ id: string }> }) => {
+    const ids = new Set((p.nodes ?? []).map((n) => n.id))
+    setSelectedNodeIds(ids)
+  }, [])
+
+  const onNodeClick = useCallback(
+    (e: { stopPropagation?: () => void }, node: { id: string }) => {
+      e.stopPropagation?.()
+      if (interactionMode !== 'select') return
+
+      setNodes((prev) => {
+        const clickedWasSelected =
+          prev.find((n) => n.id === node.id)?.selected === true
+
+        // Always collapse to single-select behavior on click:
+        // - If clicked is unselected: select only it
+        // - If clicked is selected: unselect it
+        // - If multiple are selected: clear others first, then apply the toggle above
+        const next =
+          clickedWasSelected
+            ? prev.map((n) => (n.selected ? { ...n, selected: false } : n))
+            : prev.map((n) => ({ ...n, selected: n.id === node.id }))
+
+        // If multiple were selected and the clicked node was selected, the above clears all,
+        // which matches the requested behavior.
+        return next
+      })
+
+      setSelectedNodeIds((prevIds) => {
+        const clickedWasSelected = prevIds.has(node.id)
+        return clickedWasSelected ? new Set() : new Set([node.id])
+      })
+    },
+    [interactionMode, setNodes],
+  )
+
+  const toggleSelectedActivation = useCallback(() => {
+    if (selectedNodeIds.size === 0) return
+    setInactiveNodeIds((prev) => {
+      const next = new Set(prev)
+      for (const id of selectedNodeIds) {
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+      }
+      return next
+    })
+  }, [selectedNodeIds])
+
+  const activateOnlySelected = useCallback(() => {
+    if (selectedNodeIds.size === 0) return
+    setInactiveNodeIds(() => {
+      const next = new Set<string>()
+      for (const n of nodes) {
+        if (!selectedNodeIds.has(n.id)) next.add(n.id)
+      }
+      return next
+    })
+  }, [nodes, selectedNodeIds])
+
+  const activateAll = useCallback(() => {
+    setInactiveNodeIds(new Set())
+  }, [])
+
   const downloadPng = useCallback(async () => {
     if (jobRows === null || nodes.length === 0) return
     const root = flowCanvasRef.current
@@ -486,8 +622,16 @@ export default function FlowDemo() {
 
     if (!plottingArea) return
 
+    const prevSelectedIds = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
+
     setExportingPng(true)
     try {
+      if (prevSelectedIds.size > 0) {
+        setNodes((nds) =>
+          nds.map((n) => (n.selected ? { ...n, selected: false } : n)),
+        )
+      }
+
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 
       const bg = getComputedStyle(document.documentElement)
@@ -508,16 +652,25 @@ export default function FlowDemo() {
       a.download = `${base}.png`
       a.click()
     } finally {
+      // Restore selection after exporting (selection should not be captured in PNG).
+      if (prevSelectedIds.size > 0) {
+        setNodes((nds) =>
+          nds.map((n) =>
+            prevSelectedIds.has(n.id) ? { ...n, selected: true } : n,
+          ),
+        )
+      }
+      setSelectedNodeIds(prevSelectedIds)
       setExportingPng(false)
     }
-  }, [fileLabel, jobRows, nodes.length])
+  }, [fileLabel, jobRows, nodes, setNodes])
 
   useEffect(() => {
     if (
       !flowReady ||
       jobRows === null ||
       jobRows.length === 0 ||
-      nodes.length === 0
+      baseNodes.length === 0
     ) {
       return
     }
@@ -530,8 +683,8 @@ export default function FlowDemo() {
   }, [
     flowReady,
     jobRows,
-    nodes,
-    edges,
+    baseNodes,
+    baseEdges,
     dimensionParams,
     paletteId,
     layoutScheme,
@@ -885,10 +1038,70 @@ export default function FlowDemo() {
       ) : null}
 
       <div className="flow-canvas-wrap">
-        <div
-          className="flow-canvas-actions"
-          data-hidden={exportingPng ? 'true' : 'false'}
-        >
+        <div className="flow-canvas-actions-left" data-hidden={exportingPng ? 'true' : 'false'}>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={() =>
+              setInteractionMode((m) => (m === 'pan' ? 'select' : 'pan'))
+            }
+            disabled={jobRows === null || nodes.length === 0}
+            aria-pressed={interactionMode === 'select'}
+            title={
+              interactionMode === 'pan'
+                ? 'Pan mode (click to switch to Select)'
+                : 'Select mode (click to switch to Pan)'
+            }
+            style={{ minWidth: 76, justifyContent: 'center' }}
+          >
+            {interactionMode === 'pan' ? 'PAN' : 'SELECT'}
+          </button>
+          <span
+            aria-hidden="true"
+            style={{
+              width: 1,
+              height: 16,
+              background: 'rgba(255,255,255,0.18)',
+              margin: '0 2px',
+            }}
+          />
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={toggleSelectedActivation}
+            disabled={
+              jobRows === null || nodes.length === 0 || selectedNodeIds.size === 0
+            }
+            title="TOGGLE: deactivate / reactivate selected nodes"
+            style={{ fontSize: 11, letterSpacing: '0.4px' }}
+          >
+            TOGGLE
+          </button>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={activateOnlySelected}
+            disabled={
+              jobRows === null || nodes.length === 0 || selectedNodeIds.size === 0
+            }
+            title="ONLY: activate only selected nodes"
+            style={{ fontSize: 11, letterSpacing: '0.4px' }}
+          >
+            ONLY
+          </button>
+          <button
+            type="button"
+            className="flow-canvas-action-btn"
+            onClick={activateAll}
+            disabled={jobRows === null || nodes.length === 0}
+            title="ACTIVE: activate all nodes"
+            style={{ fontSize: 11, letterSpacing: '0.4px' }}
+          >
+            ACTIVE
+          </button>
+        </div>
+
+        <div className="flow-canvas-actions-right" data-hidden={exportingPng ? 'true' : 'false'}>
           <button
             type="button"
             className="flow-canvas-action-btn"
@@ -943,17 +1156,24 @@ export default function FlowDemo() {
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
               onInit={(instance) => {
                 rfInstanceRef.current = instance
                 setFlowReady(true)
               }}
+              onPaneClick={clearSelection}
+              onNodeClick={onNodeClick}
+              onSelectionChange={onSelectionChange}
               fitViewOptions={{ padding: 0.2 }}
               minZoom={0.05}
               maxZoom={2}
-              nodesDraggable
+              nodesDraggable={interactionMode === 'pan'}
               nodesConnectable={false}
-              elementsSelectable
-              panOnDrag
+              elementsSelectable={interactionMode === 'select'}
+              panOnDrag={interactionMode === 'pan'}
+              selectionOnDrag={interactionMode === 'select'}
+              selectionMode={SelectionMode.Partial}
               zoomOnScroll
               proOptions={{ hideAttribution: true }}
             >

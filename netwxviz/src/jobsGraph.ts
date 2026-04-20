@@ -43,6 +43,8 @@ export type DotNodeData = {
   color?: string
   isExtra?: boolean
   showLabel?: boolean
+  /** UI state: node is currently deactivated (greyed out). */
+  inactive?: boolean
   /** Hash key for the active Color by mode (for legend); omitted for extra/gray nodes. */
   colorLegendKey?: string
   /** Human label matching `colorLegendKey` (for legend). */
