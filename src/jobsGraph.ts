@@ -761,8 +761,7 @@ export function layoutWithDagre(
   })
 }
 
-export function parseJobsFileJson(text: string): JobRow[] {
-  const data = JSON.parse(text) as unknown
+function parseJobsJsonArray(data: unknown): JobRow[] {
   if (!Array.isArray(data)) {
     throw new Error('Expected a JSON array of job objects')
   }
@@ -770,6 +769,213 @@ export function parseJobsFileJson(text: string): JobRow[] {
     ...row,
     frequency: deriveJobFrequency(row),
   }))
+}
+
+export function parseJobsFileJson(text: string): JobRow[] {
+  return parseJobsJsonArray(JSON.parse(text) as unknown)
+}
+
+/** Expanded workflow file format (export); import accepts this or a legacy top-level array. */
+export const WORKFLOW_FILE_FORMAT_V1 = 'netwxViz-workflow-v1' as const
+
+export type WorkflowViewport = { x: number; y: number; zoom: number }
+
+export type WorkflowOtherInfoV1 = {
+  layoutScheme: DagreLayoutScheme
+  layoutSpacing: DagreLayoutSpacing
+  paletteId: string
+  nodeColorMode: NodeColorMode
+  memberCount: number
+  chunksCount: number
+  splitsCount: number
+  showJobNames: boolean
+  showLegend: boolean
+  darkMode: boolean
+  inactiveNodeIds: string[]
+  viewport?: WorkflowViewport
+}
+
+export type WorkflowNodeInfoEntryV1 = {
+  id: string
+  position: { x: number; y: number }
+}
+
+export type ParsedWorkflowFile = {
+  rows: JobRow[]
+  nodeInfoById?: Map<string, { x: number; y: number }>
+  otherInfo?: Partial<WorkflowOtherInfoV1>
+}
+
+const DAGRE_SCHEMES: readonly DagreLayoutScheme[] = ['tb', 'bt', 'lr', 'rl']
+const DAGRE_SPACING: readonly DagreLayoutSpacing[] = ['compact', 'normal', 'relaxed']
+const NODE_COLOR_MODES: readonly NodeColorMode[] = [
+  'name',
+  'frequency',
+  'platform',
+  'member',
+  'chunk',
+]
+
+function parseLayoutScheme(v: unknown): DagreLayoutScheme | undefined {
+  return typeof v === 'string' && DAGRE_SCHEMES.includes(v as DagreLayoutScheme)
+    ? (v as DagreLayoutScheme)
+    : undefined
+}
+
+function parseLayoutSpacing(v: unknown): DagreLayoutSpacing | undefined {
+  return typeof v === 'string' && DAGRE_SPACING.includes(v as DagreLayoutSpacing)
+    ? (v as DagreLayoutSpacing)
+    : undefined
+}
+
+function parseNodeColorMode(v: unknown): NodeColorMode | undefined {
+  return typeof v === 'string' && NODE_COLOR_MODES.includes(v as NodeColorMode)
+    ? (v as NodeColorMode)
+    : undefined
+}
+
+function parseFinitePositiveInt(v: unknown, fallback: number): number {
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(1, Math.floor(n))
+}
+
+function parseNodeInfoEntries(raw: unknown): Map<string, { x: number; y: number }> {
+  const m = new Map<string, { x: number; y: number }>()
+  if (!Array.isArray(raw)) return m
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as { id?: unknown; position?: unknown }
+    if (typeof rec.id !== 'string' || !rec.id) continue
+    const pos = rec.position
+    if (!pos || typeof pos !== 'object') continue
+    const px = (pos as { x?: unknown }).x
+    const py = (pos as { y?: unknown }).y
+    if (typeof px !== 'number' || typeof py !== 'number') continue
+    if (!Number.isFinite(px) || !Number.isFinite(py)) continue
+    m.set(rec.id, { x: px, y: py })
+  }
+  return m
+}
+
+function parseViewport(v: unknown): WorkflowViewport | undefined {
+  if (!v || typeof v !== 'object') return undefined
+  const o = v as { x?: unknown; y?: unknown; zoom?: unknown }
+  const x = o.x
+  const y = o.y
+  const zoom = o.zoom
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof zoom !== 'number') return undefined
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(zoom)) return undefined
+  return { x, y, zoom }
+}
+
+function parseOtherInfo(raw: unknown): Partial<WorkflowOtherInfoV1> {
+  if (!raw || typeof raw !== 'object') return {}
+  const o = raw as Record<string, unknown>
+  const out: Partial<WorkflowOtherInfoV1> = {}
+
+  const ls = parseLayoutScheme(o.layoutScheme)
+  if (ls !== undefined) out.layoutScheme = ls
+
+  const lsp = parseLayoutSpacing(o.layoutSpacing)
+  if (lsp !== undefined) out.layoutSpacing = lsp
+
+  if (typeof o.paletteId === 'string' && o.paletteId) out.paletteId = o.paletteId
+
+  const ncm = parseNodeColorMode(o.nodeColorMode)
+  if (ncm !== undefined) out.nodeColorMode = ncm
+
+  if (o.memberCount != null) out.memberCount = parseFinitePositiveInt(o.memberCount, 1)
+  if (o.chunksCount != null) out.chunksCount = parseFinitePositiveInt(o.chunksCount, 1)
+  if (o.splitsCount != null) out.splitsCount = parseFinitePositiveInt(o.splitsCount, 1)
+
+  if (typeof o.showJobNames === 'boolean') out.showJobNames = o.showJobNames
+  if (typeof o.showLegend === 'boolean') out.showLegend = o.showLegend
+  if (typeof o.darkMode === 'boolean') out.darkMode = o.darkMode
+
+  const inactive = o.inactiveNodeIds
+  if (Array.isArray(inactive)) {
+    out.inactiveNodeIds = inactive.filter((x): x is string => typeof x === 'string')
+  }
+
+  const vp = parseViewport(o.viewport)
+  if (vp !== undefined) out.viewport = vp
+
+  return out
+}
+
+/**
+ * Parse a legacy `jobs.json` array or an expanded workflow document
+ * (`format` + `nodes` + optional `node-info` / `other-info`, or camelCase aliases).
+ */
+export function parseWorkflowFileJson(text: string): ParsedWorkflowFile {
+  let data: unknown
+  try {
+    data = JSON.parse(text) as unknown
+  } catch {
+    throw new Error('Invalid JSON')
+  }
+
+  if (Array.isArray(data)) {
+    return { rows: parseJobsJsonArray(data) }
+  }
+
+  if (!data || typeof data !== 'object') {
+    throw new Error('Expected a JSON array of job objects or a workflow object')
+  }
+
+  const obj = data as Record<string, unknown>
+  const nodesRaw = obj.nodes
+  if (!Array.isArray(nodesRaw)) {
+    throw new Error('Workflow object must contain a "nodes" array')
+  }
+
+  const rows = parseJobsJsonArray(nodesRaw)
+  const nodeInfoRaw = obj['node-info'] ?? obj.nodeInfo
+  const nodeInfoById = parseNodeInfoEntries(nodeInfoRaw)
+  const otherRaw = obj['other-info'] ?? obj.otherInfo
+  const otherInfo = parseOtherInfo(otherRaw)
+
+  return {
+    rows,
+    ...(nodeInfoById.size > 0 ? { nodeInfoById } : {}),
+    ...(Object.keys(otherInfo).length > 0 ? { otherInfo } : {}),
+  }
+}
+
+/** Strip fields derived on load so export matches Autosubmit-style rows. */
+export function jobRowsToExportNodes(rows: JobRow[]): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const copy = { ...row } as Record<string, unknown>
+    delete copy.frequency
+    return copy
+  })
+}
+
+export function applySavedPositions(
+  nodes: DotNodeType[],
+  saved: Map<string, { x: number; y: number }> | null | undefined,
+): DotNodeType[] {
+  if (!saved || saved.size === 0) return nodes
+  return nodes.map((n) => {
+    const p = saved.get(n.id)
+    if (p == null) return n
+    return { ...n, position: { x: p.x, y: p.y } }
+  })
+}
+
+export function stringifyWorkflowFileV1(
+  rows: JobRow[],
+  nodeInfos: WorkflowNodeInfoEntryV1[],
+  otherInfo: WorkflowOtherInfoV1,
+): string {
+  const payload = {
+    format: WORKFLOW_FILE_FORMAT_V1,
+    nodes: jobRowsToExportNodes(rows),
+    'node-info': nodeInfos,
+    'other-info': otherInfo,
+  }
+  return JSON.stringify(payload, null, 2)
 }
 
 /** Finer levels have higher numbers (Autosubmit: once → … → chunk/split). */

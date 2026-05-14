@@ -34,14 +34,18 @@ import {
   type DagreLayoutSpacing,
   type DotNodeType,
   type NodeColorMode,
+  applySavedPositions,
   buildExpandedGraphFromJobs,
   collectExpandedColorLegendEntries,
   edgeCrossesChunkBoundaries,
   layoutWithDagre,
-  parseJobsFileJson,
+  parseWorkflowFileJson,
+  stringifyWorkflowFileV1,
   type DimensionParams,
   type JobEdgeData,
   type JobRow,
+  type WorkflowOtherInfoV1,
+  type WorkflowViewport,
 } from './jobsGraph'
 import { DotNode, type GraphConfig } from './components/DotNode'
 import {
@@ -112,6 +116,12 @@ export default function FlowGraph() {
   const flowCanvasRef = useRef<HTMLDivElement | null>(null)
   const [exportingPng, setExportingPng] = useState(false)
 
+  const [importedNodePositions, setImportedNodePositions] = useState<
+    Map<string, { x: number; y: number }> | null
+  >(null)
+  const pendingViewportRef = useRef<WorkflowViewport | null>(null)
+  const skipNextFitRef = useRef(false)
+
   const [interactionMode, setInteractionMode] = useState<'pan' | 'select'>('pan')
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(() => new Set())
   const [inactiveNodeIds, setInactiveNodeIds] = useState<Set<string>>(() => new Set())
@@ -167,6 +177,65 @@ export default function FlowGraph() {
     }
   }, [memberCount, chunksCount, splitsCount])
 
+  const applyWorkflowImportToolbar = useCallback(
+    (partial: Partial<WorkflowOtherInfoV1> | undefined) => {
+      if (!partial) return
+      if (partial.layoutScheme !== undefined) setLayoutScheme(partial.layoutScheme)
+      if (partial.layoutSpacing !== undefined) setLayoutSpacing(partial.layoutSpacing)
+      if (partial.paletteId !== undefined) {
+        if (GRAPH_COLOR_PALETTES.some((p) => p.id === partial.paletteId)) {
+          setPaletteId(partial.paletteId)
+        }
+      }
+      if (partial.nodeColorMode !== undefined) setNodeColorMode(partial.nodeColorMode)
+      if (partial.memberCount !== undefined) setMemberCount(partial.memberCount)
+      if (partial.chunksCount !== undefined) setChunksCount(partial.chunksCount)
+      if (partial.splitsCount !== undefined) setSplitsCount(partial.splitsCount)
+      if (partial.showJobNames !== undefined) setShowJobNames(partial.showJobNames)
+      if (partial.showLegend !== undefined) setShowLegend(partial.showLegend)
+      if (partial.darkMode !== undefined) setDarkMode(partial.darkMode)
+      if (partial.inactiveNodeIds !== undefined) {
+        setInactiveNodeIds(new Set(partial.inactiveNodeIds))
+      }
+    },
+    [],
+  )
+
+  /** Fingerprint of everything that affects Dagre layout; excludes palette / color mode / theme. */
+  const layoutGeometryKey = useMemo(() => {
+    if (jobRows === null || jobRows.length === 0) return ''
+    const jobsPayload = jobRows.map((r) => {
+      const { frequency: _f, ...rest } = r
+      return rest
+    })
+    const importedKey =
+      importedNodePositions == null || importedNodePositions.size === 0
+        ? ''
+        : [...importedNodePositions.entries()]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([id, p]) => `${id}:${p.x},${p.y}`)
+            .join('|')
+    return JSON.stringify({
+      jobs: jobsPayload,
+      members: dimensionParams.members,
+      numChunks: dimensionParams.numChunks,
+      numSplits: dimensionParams.numSplits,
+      layoutScheme,
+      layoutSpacing,
+      showJobNames,
+      importedKey,
+    })
+  }, [
+    jobRows,
+    dimensionParams,
+    layoutScheme,
+    layoutSpacing,
+    showJobNames,
+    importedNodePositions,
+  ])
+
+  const prevLayoutGeometryKeyRef = useRef<string | null>(null)
+
   const nodeTypes = useMemo(() => ({ dot: DotNode }), [])
 
   const { baseNodes, baseEdges } = useMemo(() => {
@@ -210,7 +279,8 @@ export default function FlowGraph() {
           },
         }
       })
-    return { baseNodes: laidOut, baseEdges: styledEdges }
+    const positioned = applySavedPositions(laidOut, importedNodePositions)
+    return { baseNodes: positioned, baseEdges: styledEdges }
   }, [
     jobRows,
     dimensionParams,
@@ -223,6 +293,7 @@ export default function FlowGraph() {
     config.edgeAnimated,
     config.edgeWidth,
     darkMode,
+    importedNodePositions,
   ])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<DotNodeType>([])
@@ -233,12 +304,25 @@ export default function FlowGraph() {
     const nextInactive = new Set([...inactiveNodeIds].filter((id) => presentIds.has(id)))
     if (nextInactive.size !== inactiveNodeIds.size) setInactiveNodeIds(nextInactive)
 
+    const geometryUnchanged =
+      prevLayoutGeometryKeyRef.current !== null &&
+      prevLayoutGeometryKeyRef.current === layoutGeometryKey
+
     setNodes((prev) => {
       const prevSelected = new Map<string, boolean>()
       for (const n of prev) prevSelected.set(n.id, n.selected === true)
 
+      const prevPos = new Map(prev.map((n) => [n.id, n.position]))
+      const sameTopology =
+        prev.length > 0 &&
+        prev.length === baseNodes.length &&
+        baseNodes.every((n) => prevPos.has(n.id))
+
+      const preservePositions = geometryUnchanged && sameTopology
+
       return baseNodes.map((n) => ({
         ...n,
+        position: preservePositions ? (prevPos.get(n.id) ?? n.position) : n.position,
         selected: prevSelected.get(n.id) ?? false,
         data: {
           ...n.data,
@@ -265,7 +349,17 @@ export default function FlowGraph() {
         }
       }),
     )
-  }, [baseNodes, baseEdges, inactiveNodeIds, palette.edgeColor, setEdges, setNodes])
+
+    prevLayoutGeometryKeyRef.current = layoutGeometryKey
+  }, [
+    baseNodes,
+    baseEdges,
+    inactiveNodeIds,
+    layoutGeometryKey,
+    palette.edgeColor,
+    setEdges,
+    setNodes,
+  ])
 
   const colorLegendEntries = useMemo(
     () => collectExpandedColorLegendEntries(nodes, nodeColorMode),
@@ -283,16 +377,36 @@ export default function FlowGraph() {
       setFileLabel(file.name)
       try {
         const text = await file.text()
-        const rows = parseJobsFileJson(text)
-        setJobRows(rows)
-        if (rows.length === 0) resetFlow()
+        const parsed = parseWorkflowFileJson(text)
+
+        if (parsed.otherInfo?.viewport != null) {
+          pendingViewportRef.current = parsed.otherInfo.viewport
+          skipNextFitRef.current = true
+        } else {
+          pendingViewportRef.current = null
+          skipNextFitRef.current = false
+        }
+
+        setInactiveNodeIds(new Set())
+        applyWorkflowImportToolbar(parsed.otherInfo)
+        setImportedNodePositions(parsed.nodeInfoById ?? null)
+        setJobRows(parsed.rows)
+        if (parsed.rows.length === 0) {
+          resetFlow()
+          setImportedNodePositions(null)
+          pendingViewportRef.current = null
+          skipNextFitRef.current = false
+        }
       } catch (err) {
         setJobRows(null)
         resetFlow()
+        setImportedNodePositions(null)
+        pendingViewportRef.current = null
+        skipNextFitRef.current = false
         setError(err instanceof Error ? err.message : 'Failed to read jobs file')
       }
     },
-    [resetFlow],
+    [applyWorkflowImportToolbar, resetFlow],
   )
 
   const loadSample = useCallback(async () => {
@@ -303,22 +417,36 @@ export default function FlowGraph() {
       const res = await fetch(SAMPLE_URL, { cache: 'no-store' })
       if (!res.ok) throw new Error(`Could not load ${SAMPLE_URL} (${res.status})`)
       const text = await res.text()
-      const rows = parseJobsFileJson(text)
-      setJobRows(rows)
-      if (rows.length === 0) resetFlow()
+      const parsed = parseWorkflowFileJson(text)
+      pendingViewportRef.current = null
+      skipNextFitRef.current = false
+      setInactiveNodeIds(new Set())
+      applyWorkflowImportToolbar(parsed.otherInfo)
+      setImportedNodePositions(parsed.nodeInfoById ?? null)
+      setJobRows(parsed.rows)
+      if (parsed.rows.length === 0) {
+        resetFlow()
+        setImportedNodePositions(null)
+      }
     } catch (err) {
       setJobRows(null)
       resetFlow()
+      setImportedNodePositions(null)
+      pendingViewportRef.current = null
+      skipNextFitRef.current = false
       setError(err instanceof Error ? err.message : 'Failed to load sample')
     } finally {
       setLoadingSample(false)
     }
-  }, [resetFlow])
+  }, [applyWorkflowImportToolbar, resetFlow])
 
   const clearGraph = useCallback(() => {
     setJobRows(null)
     setFileLabel('')
     setError(null)
+    setImportedNodePositions(null)
+    pendingViewportRef.current = null
+    skipNextFitRef.current = false
     resetFlow()
   }, [resetFlow])
 
@@ -328,6 +456,64 @@ export default function FlowGraph() {
       duration: 200,
     })
   }, [])
+
+  const exportWorkflowJson = useCallback(() => {
+    if (jobRows === null || jobRows.length === 0) return
+    const vp = rfInstanceRef.current?.getViewport()
+    const otherInfo: WorkflowOtherInfoV1 = {
+      layoutScheme,
+      layoutSpacing,
+      paletteId,
+      nodeColorMode,
+      memberCount,
+      chunksCount,
+      splitsCount,
+      showJobNames,
+      showLegend,
+      darkMode,
+      inactiveNodeIds: [...inactiveNodeIds],
+      ...(vp != null &&
+      Number.isFinite(vp.x) &&
+      Number.isFinite(vp.y) &&
+      Number.isFinite(vp.zoom)
+        ? { viewport: { x: vp.x, y: vp.y, zoom: vp.zoom } }
+        : {}),
+    }
+    const nodeInfos = nodes.map((n) => ({
+      id: n.id,
+      position: { x: n.position.x, y: n.position.y },
+    }))
+    const json = stringifyWorkflowFileV1(jobRows, nodeInfos, otherInfo)
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
+    const base =
+      (fileLabel || 'workflow')
+        .replace(/\s+\(.*\)\s*$/, '')
+        .replace(/\.[^.]+$/, '') || 'workflow'
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${base}-workflow.json`
+    a.type = 'application/json'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }, [
+    chunksCount,
+    darkMode,
+    fileLabel,
+    inactiveNodeIds,
+    jobRows,
+    layoutScheme,
+    layoutSpacing,
+    memberCount,
+    nodeColorMode,
+    nodes,
+    paletteId,
+    showJobNames,
+    showLegend,
+    splitsCount,
+  ])
 
   const clearSelection = useCallback(() => {
     setSelectedNodeIds(new Set())
@@ -642,6 +828,14 @@ export default function FlowGraph() {
     ) {
       return
     }
+    const vp = pendingViewportRef.current
+    if (skipNextFitRef.current && vp != null) {
+      skipNextFitRef.current = false
+      pendingViewportRef.current = null
+      rfInstanceRef.current?.setViewport(vp)
+      return
+    }
+    skipNextFitRef.current = false
     const id = requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         fitGraphView()
@@ -845,24 +1039,35 @@ export default function FlowGraph() {
             type="button"
             className="flow-toolbar-btn"
             onClick={onPickFile}
+            title="Import a jobs.json array or expanded workflow JSON"
           >
-            Select jobs file…
+            Import
           </button>
           <button
             type="button"
             className="flow-toolbar-btn"
-            onClick={loadSample}
-            disabled={loadingSample}
+            onClick={exportWorkflowJson}
+            disabled={jobRows === null || jobRows.length === 0}
+            title="Download workflow as JSON (nodes, positions, and view settings)"
           >
-            {loadingSample ? 'Loading…' : 'Load sample'}
+            Export
           </button>
           <button
             type="button"
             className="flow-toolbar-btn"
-            onClick={clearGraph}
-            disabled={jobRows === null}
+            onClick={jobRows === null ? loadSample : clearGraph}
+            disabled={jobRows === null && loadingSample}
+            title={
+              jobRows === null
+                ? 'Load bundled jobs-sample.json'
+                : 'Clear the current workflow'
+            }
           >
-            Clear
+            {jobRows === null
+              ? loadingSample
+                ? 'Loading…'
+                : 'Sample'
+              : 'Clear'}
           </button>
           <button
             type="button"
@@ -1381,7 +1586,8 @@ export default function FlowGraph() {
               padding: 24,
             }}
           >
-            No graph yet — select a <code>jobs.json</code>-style file or load the sample.
+            No graph yet — use <strong>Import</strong> for a <code>jobs.json</code>-style or
+            workflow JSON file, or <strong>Sample</strong> for the bundled example.
           </div>
         ) : jobRows.length === 0 ? (
           <div
