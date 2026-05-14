@@ -297,6 +297,11 @@ export default function FlowGraph() {
   ])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<DotNodeType>([])
+  /** Pre-click `nodes[].selected` — React Flow runs `handleNodeClick` before `onNodeClick`, so batched `setNodes(prev=>…)` sees RF-updated `prev` and would mis-detect "already selected". */
+  const preClickNodeSelectedRef = useRef<Map<string, boolean>>(new Map())
+  preClickNodeSelectedRef.current = new Map(
+    nodes.map((n) => [n.id, n.selected === true]),
+  )
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<JobEdgeData>>([])
 
   useEffect(() => {
@@ -532,10 +537,10 @@ export default function FlowGraph() {
       e.stopPropagation?.()
       if (interactionMode !== 'select') return
 
-      setNodes((prev) => {
-        const clickedWasSelected =
-          prev.find((n) => n.id === node.id)?.selected === true
+      const clickedWasSelected =
+        preClickNodeSelectedRef.current.get(node.id) === true
 
+      setNodes((prev) => {
         // Always collapse to single-select behavior on click:
         // - If clicked is unselected: select only it
         // - If clicked is selected: unselect it
@@ -550,10 +555,9 @@ export default function FlowGraph() {
         return next
       })
 
-      setSelectedNodeIds((prevIds) => {
-        const clickedWasSelected = prevIds.has(node.id)
-        return clickedWasSelected ? new Set() : new Set([node.id])
-      })
+      setSelectedNodeIds(
+        clickedWasSelected ? new Set() : new Set([node.id]),
+      )
     },
     [interactionMode, setNodes],
   )
