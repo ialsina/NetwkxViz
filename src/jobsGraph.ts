@@ -589,7 +589,7 @@ const DOT_VISUAL = 18
 
 /**
  * Approximate bounding box for layout so Dagre reserves space for labels below the dot.
- * Must match `DotNode` padding, label card padding/border, and line-heights in `FlowDemo.tsx`.
+ * Must match `DotNode` padding, label card padding/border, and line-heights in `components/DotNode.tsx`.
  */
 export function estimateNodeLayoutBox(
   data: DotNodeData,

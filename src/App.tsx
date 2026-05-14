@@ -1,4 +1,4 @@
-import FlowDemo from './FlowDemo'
+import FlowGraph from './FlowGraph'
 
 function App() {
   return (
@@ -12,7 +12,7 @@ function App() {
         height: '100%',
       }}
     >
-      <FlowDemo />
+      <FlowGraph />
     </div>
   )
 }

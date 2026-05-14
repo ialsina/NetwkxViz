@@ -10,16 +10,14 @@ import { flushSync } from 'react-dom'
 import {
   Background,
   BackgroundVariant,
-  Handle,
   MarkerType,
   Panel,
-  Position,
   ReactFlow,
   SelectionMode,
   useEdgesState,
   useNodesState,
   type Edge,
-  type NodeProps,
+  type EdgeMarker,
   type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
@@ -45,804 +43,33 @@ import {
   type JobEdgeData,
   type JobRow,
 } from './jobsGraph'
-
-function memberLabelsFromCount(count: number): string[] {
-  const n = Math.max(1, count)
-  return Array.from({ length: n }, (_, i) => `member${i + 1}`)
-}
-
-function legendTitleFromColorBy(mode: NodeColorMode): string {
-  switch (mode) {
-    case 'name':
-      return 'Job Name'
-    case 'frequency':
-      return 'Frequency'
-    case 'platform':
-      return 'Platforms'
-    case 'member':
-      return 'Members'
-    case 'chunk':
-      return 'Chunks'
-  }
-}
-
-function legendValueLabel(mode: NodeColorMode, e: { key: string; label: string }): string {
-  if (e.key === '__extra__') return e.label
-  switch (mode) {
-    case 'frequency':
-    case 'platform':
-    case 'member':
-    case 'chunk':
-    case 'name':
-    default:
-      return mode === 'platform' ? e.label : e.key
-  }
-}
-
-function copyComputedStyles(
-  source: Element,
-  target: Element,
-  include: (name: string) => boolean,
-) {
-  const computed = getComputedStyle(source)
-  for (let i = 0; i < computed.length; i++) {
-    const name = computed.item(i)
-    if (!include(name)) continue
-    target.setAttribute('style', `${target.getAttribute('style') ?? ''}${name}:${computed.getPropertyValue(name)};`)
-  }
-}
-
-function deepCloneWithInlineStyles(node: HTMLElement): HTMLElement {
-  const clone = node.cloneNode(true) as HTMLElement
-
-  const includeStyle = (name: string) => {
-    if (name.startsWith('-')) return false
-    return (
-      name.startsWith('background') ||
-      name.startsWith('border') ||
-      name.startsWith('box') ||
-      name.startsWith('color') ||
-      name.startsWith('display') ||
-      name.startsWith('filter') ||
-      name.startsWith('flex') ||
-      name.startsWith('font') ||
-      name.startsWith('gap') ||
-      name.startsWith('height') ||
-      name.startsWith('justify') ||
-      name.startsWith('left') ||
-      name.startsWith('letter') ||
-      name.startsWith('line') ||
-      name.startsWith('margin') ||
-      name.startsWith('max') ||
-      name.startsWith('min') ||
-      name.startsWith('opacity') ||
-      name.startsWith('overflow') ||
-      name.startsWith('padding') ||
-      name.startsWith('position') ||
-      name.startsWith('right') ||
-      name.startsWith('stroke') ||
-      name.startsWith('text') ||
-      name.startsWith('top') ||
-      name.startsWith('transform') ||
-      name.startsWith('visibility') ||
-      name.startsWith('width') ||
-      name.startsWith('z-index')
-    )
-  }
-
-  const sourceEls = [node, ...Array.from(node.querySelectorAll('*'))]
-  const targetEls = [clone, ...Array.from(clone.querySelectorAll('*'))]
-  for (let i = 0; i < sourceEls.length; i++) {
-    const s = sourceEls[i]
-    const t = targetEls[i]
-    if (!t) continue
-    copyComputedStyles(s, t, includeStyle)
-  }
-
-  // Remove elements we don't want in exports (after styling, to keep DOM alignment).
-  clone
-    .querySelectorAll(
-      [
-        // Dotted grid background.
-        '.react-flow__background',
-        '.xy-flow__background',
-        // React Flow a11y instructions / live regions.
-        '.react-flow__aria-live',
-        '.xy-flow__aria-live',
-        '[aria-live]',
-        // Misc overlays we never want in the exported picture.
-        '.react-flow__attribution',
-        '.xy-flow__attribution',
-      ].join(','),
-    )
-    .forEach((el) => el.remove())
-
-  // Export-only layout fixes: SVG foreignObject rendering doesn't reliably support flex `gap`,
-  // so add a margin fallback for legend swatches to keep spacing consistent in the PNG.
-  clone.querySelectorAll<HTMLElement>('.flow-legend-swatch').forEach((el) => {
-    el.style.marginRight = '10px'
-    el.style.flexShrink = '0'
-    el.style.display = 'inline-block'
-  })
-
-  return clone
-}
-
-type ExportFormat = 'png' | 'jpg' | 'svg'
-type ExportBackground = 'transparent' | 'white' | 'dark'
-
-function elementToSvgText(el: HTMLElement, opts?: { backgroundColor?: string }) {
-  const rect = el.getBoundingClientRect()
-  const width = Math.max(1, Math.round(rect.width))
-  const height = Math.max(1, Math.round(rect.height))
-
-  const clone = deepCloneWithInlineStyles(el)
-  clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml')
-
-  const serialized = new XMLSerializer().serializeToString(clone)
-  const bg = opts?.backgroundColor
-    ? `<rect width="100%" height="100%" fill="${opts.backgroundColor}"/>`
-    : ''
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
-  ${bg}
-  <foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject>
-</svg>`
-}
-
-async function elementToRasterBlob(
-  el: HTMLElement,
-  opts?: { backgroundColor?: string; dpi?: number; mimeType?: 'image/png' | 'image/jpeg'; quality?: number },
-) {
-  const rect = el.getBoundingClientRect()
-  const width = Math.max(1, Math.round(rect.width))
-  const height = Math.max(1, Math.round(rect.height))
-
-  const svg = elementToSvgText(el, { backgroundColor: opts?.backgroundColor })
-
-  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  try {
-    const img = new Image()
-    img.decoding = 'async'
-    img.src = url
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve()
-      img.onerror = () => reject(new Error('Failed to render image'))
-    })
-
-    const canvas = document.createElement('canvas')
-    const ratio = opts?.dpi ?? Math.min(6, Math.max(3, (window.devicePixelRatio || 1) * 2))
-    canvas.width = Math.round(width * ratio)
-    canvas.height = Math.round(height * ratio)
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Canvas not available')
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-    ctx.drawImage(img, 0, 0)
-    const mimeType = opts?.mimeType ?? 'image/png'
-    const quality = opts?.quality
-    const outBlob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (b) => {
-          if (!b) reject(new Error(`Failed to encode ${mimeType}`))
-          else resolve(b)
-        },
-        mimeType,
-        quality,
-      )
-    })
-    return outBlob
-  } finally {
-    URL.revokeObjectURL(url)
-  }
-}
-
-// ── Animation types & helpers ────────────────────────────────────────────────
-
-type AnimKeyframe = {
-  viewport: { x: number; y: number; zoom: number }
-  inactiveNodeIds: Set<string>
-}
-
-type AnimCurve = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'cubic'
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t
-}
-
-function applyEasing(curve: AnimCurve, t: number): number {
-  switch (curve) {
-    case 'linear':     return t
-    case 'ease-in':    return t * t
-    case 'ease-out':   return 1 - (1 - t) * (1 - t)
-    case 'ease-in-out':
-      return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2
-    case 'cubic':
-      return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2
-  }
-}
-
-function u16le(n: number): number[] {
-  return [n & 0xff, (n >> 8) & 0xff]
-}
-
-function clampByte(n: number): number {
-  return Math.max(0, Math.min(255, Math.round(n)))
-}
-
-function makeFixed256ColorTable(): Uint8Array {
-  // Grey-preserving fixed palette:
-  // - 6×6×6 color cube (216 colors)
-  // - 40-step grayscale ramp (40 colors)
-  // Total = 256.
-  const table = new Uint8Array(256 * 3)
-  let idx = 0
-
-  for (let r6 = 0; r6 < 6; r6++) {
-    for (let g6 = 0; g6 < 6; g6++) {
-      for (let b6 = 0; b6 < 6; b6++) {
-        table[idx * 3 + 0] = clampByte((r6 * 255) / 5)
-        table[idx * 3 + 1] = clampByte((g6 * 255) / 5)
-        table[idx * 3 + 2] = clampByte((b6 * 255) / 5)
-        idx++
-      }
-    }
-  }
-
-  for (let k = 0; k < 40; k++) {
-    const v = clampByte((k * 255) / 39)
-    table[idx * 3 + 0] = v
-    table[idx * 3 + 1] = v
-    table[idx * 3 + 2] = v
-    idx++
-  }
-
-  return table
-}
-
-function rgbaToFixedPaletteIndices(img: ImageData): Uint8Array {
-  const { data, width, height } = img
-  const out = new Uint8Array(width * height)
-
-  for (let p = 0, i = 0; p < out.length; p++, i += 4) {
-    const r = data[i]
-    const g = data[i + 1]
-    const b = data[i + 2]
-    // Ignore alpha; rendered frames have background already composited in.
-
-    // Candidate 1: nearest entry in the 6×6×6 colour cube (indices 0..215).
-    const r6 = Math.max(0, Math.min(5, Math.round((r * 5) / 255)))
-    const g6 = Math.max(0, Math.min(5, Math.round((g * 5) / 255)))
-    const b6 = Math.max(0, Math.min(5, Math.round((b * 5) / 255)))
-    const cr = clampByte((r6 * 255) / 5)
-    const cg = clampByte((g6 * 255) / 5)
-    const cb = clampByte((b6 * 255) / 5)
-    const cubeErr = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb)
-
-    // Candidate 2: nearest entry in the 40-step grayscale ramp (indices 216..255).
-    const y = (r + g + b) / 3
-    const k = Math.max(0, Math.min(39, Math.round((y * 39) / 255)))
-    const gv = clampByte((k * 255) / 39)
-    const grayErr = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv)
-
-    // Pick whichever candidate is actually closer in RGB space — no heuristics needed.
-    out[p] = grayErr < cubeErr ? 216 + k : r6 * 36 + g6 * 6 + b6
-  }
-
-  return out
-}
-
-// LZW encoder using a flat Uint16Array[4096*256] children dictionary.
-// children[parentCode*256 + symbol] = childCode, 0xFFFF = absent.
-// Avoids all string allocations and Map lookups of the naive approach.
-function lzwEncode8BitFast(indices: Uint8Array): Uint8Array {
-  const clearCode = 256
-  const endCode = 257
-  const children = new Uint16Array(4096 * 256).fill(0xffff)
-  let nextCode = endCode + 1
-  let codeSize = 9
-  const out: number[] = []
-  let cur = 0
-  let curBits = 0
-
-  const writeCode = (code: number) => {
-    cur |= code << curBits
-    curBits += codeSize
-    while (curBits >= 8) { out.push(cur & 0xff); cur >>= 8; curBits -= 8 }
-  }
-  const resetDict = () => {
-    children.fill(0xffff)
-    nextCode = endCode + 1
-    codeSize = 9
-  }
-
-  writeCode(clearCode)
-  let w = indices[0] ?? 0
-  for (let i = 1; i < indices.length; i++) {
-    const k = indices[i]
-    const slot = w * 256 + k
-    const child = children[slot]
-    if (child !== 0xffff) { w = child; continue }
-    writeCode(w)
-    if (nextCode < 4096) {
-      children[slot] = nextCode
-      if (nextCode === (1 << codeSize) && codeSize < 12) codeSize++
-      nextCode++
-    } else {
-      writeCode(clearCode)
-      resetDict()
-    }
-    w = k
-  }
-  writeCode(w)
-  writeCode(endCode)
-  if (curBits > 0) out.push(cur & 0xff)
-  return new Uint8Array(out)
-}
-
-// Wraps raw LZW bytes in GIF sub-blocks (max 255 bytes each) + terminator.
-function toSubBlocks(data: Uint8Array): Uint8Array {
-  const rem = data.length % 255
-  const size = Math.floor(data.length / 255) * 256 + (rem > 0 ? rem + 1 : 0) + 1
-  const out = new Uint8Array(size)
-  let ri = 0, wi = 0
-  while (ri < data.length) {
-    const n = Math.min(255, data.length - ri)
-    out[wi++] = n
-    out.set(data.subarray(ri, ri + n), wi)
-    wi += n; ri += n
-  }
-  out[wi] = 0
-  return out
-}
-
-// ── Canvas-based animation renderer ──────────────────────────────────────────
-// Replaces the DOM→SVG→Canvas pipeline: extracts data ONCE, draws per frame
-// with pure canvas2D. No React re-renders, no style traversal, no rAF waits.
-
-type AnimRenderData = {
-  containerW: number
-  containerH: number
-  activeEdgeColor: string
-  edges: Array<{
-    pathD: string
-    isDashed: boolean
-    source: string
-    target: string
-  }>
-  nodes: Array<{
-    id: string
-    x: number
-    y: number
-    w: number
-    h: number
-    color: string
-    label: string
-    labelLine2: string | null
-    showLabel: boolean
-  }>
-}
-
-function extractAnimRenderData(
-  plottingArea: HTMLElement,
-  reactNodes: DotNodeType[],
-  reactEdges: Edge<JobEdgeData>[],
-  activeEdgeColor: string,
-): AnimRenderData {
-  const rect = plottingArea.getBoundingClientRect()
-
-  // Extract SVG path `d` attributes from the DOM (geometry only — colours are derived from
-  // activeEdgeColor, not from live edge styles which may already be mutated to the muted shade).
-  const edgePathMap = new Map<string, { pathD: string; isDashed: boolean }>()
-  plottingArea.querySelectorAll<Element>('[data-id]').forEach((el) => {
-    const pathEl = el.querySelector<SVGPathElement>('path')
-    if (!pathEl) return
-    const d = pathEl.getAttribute('d')
-    if (!d) return
-    const id = el.getAttribute('data-id') ?? ''
-    const dashes = pathEl.getAttribute('stroke-dasharray') ?? pathEl.style.strokeDasharray ?? ''
-    edgePathMap.set(id, { pathD: d, isDashed: dashes !== '' && dashes !== 'none' })
-  })
-
-  const edges = reactEdges
-    .filter((e) => e.source !== e.target)
-    .map((e) => ({
-      pathD: edgePathMap.get(e.id)?.pathD ?? '',
-      isDashed: edgePathMap.get(e.id)?.isDashed ?? false,
-      source: e.source,
-      target: e.target,
-    }))
-    .filter((e) => e.pathD !== '')
-
-  const nodes = reactNodes.map((n) => {
-    const anyN = n as unknown as { measured?: { width?: number; height?: number } }
-    return {
-      id: n.id,
-      x: n.position.x,
-      y: n.position.y,
-      w: anyN.measured?.width ?? 36,
-      h: anyN.measured?.height ?? 36,
-      color: n.data.color ?? '#aa3bff',
-      label: String(n.data.label ?? ''),
-      labelLine2: n.data.labelLine2 ? String(n.data.labelLine2) : null,
-      showLabel: !!(n.data as unknown as { showLabel?: boolean }).showLabel,
-    }
-  })
-
-  return { containerW: Math.round(rect.width), containerH: Math.round(rect.height), activeEdgeColor, edges, nodes }
-}
-
-const ANIM_DOT_R = 9    // half of the 18px circle diameter
-const ANIM_DOT_PAD = 4  // top padding in DotNode before the circle center
-
-function withAlpha(color: string, alpha: number): string {
-  const a = Math.max(0, Math.min(1, alpha))
-  const c = color.trim()
-
-  // #rgb / #rrggbb
-  if (c.startsWith('#')) {
-    const hex = c.slice(1)
-    const full =
-      hex.length === 3
-        ? hex.split('').map((ch) => ch + ch).join('')
-        : hex.length === 6
-          ? hex
-          : null
-    if (full) {
-      const r = parseInt(full.slice(0, 2), 16)
-      const g = parseInt(full.slice(2, 4), 16)
-      const b = parseInt(full.slice(4, 6), 16)
-      return `rgba(${r},${g},${b},${a})`
-    }
-  }
-
-  // rgb(r,g,b) / rgba(r,g,b,a)
-  const m = c.match(/^rgba?\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+))?\s*\)$/i)
-  if (m) {
-    const r = Math.round(Number(m[1]))
-    const g = Math.round(Number(m[2]))
-    const b = Math.round(Number(m[3]))
-    return `rgba(${r},${g},${b},${a})`
-  }
-
-  // Fall back: if it's an unknown CSS color string, keep it unchanged.
-  return color
-}
-
-// Parse the last cubic bezier segment of a React Flow edge path (uppercase C = absolute coords).
-function arrowheadFromPath(d: string): { cp2x: number; cp2y: number; tx: number; ty: number } | null {
-  const re = /C\s*([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)[\s,]+([-\d.e+]+)/g
-  let last: RegExpExecArray | null = null
-  let m: RegExpExecArray | null = null
-  while ((m = re.exec(d)) !== null) last = m
-  if (!last) return null
-  return { cp2x: +last[3], cp2y: +last[4], tx: +last[5], ty: +last[6] }
-}
-
-function renderNodeLabelOnCanvas(
-  ctx: CanvasRenderingContext2D,
-  label: string,
-  line2: string | null,
-  cx: number,
-  dotBottom: number,
-  alpha: number,
-  textColor: string,
-  pillBg: string,
-  pillBorder: string,
-) {
-  const padH = 8, padV = 4, r = 10, fs1 = 11, fs2 = 10, lh1 = 14, lh2 = 13
-  ctx.save()
-  ctx.globalAlpha = alpha
-  ctx.font = `600 ${fs1}px system-ui,'Segoe UI',sans-serif`
-  const w1 = ctx.measureText(label).width
-  let w2 = 0
-  if (line2) { ctx.font = `500 ${fs2}px system-ui,'Segoe UI',sans-serif`; w2 = ctx.measureText(line2).width }
-  const pillW = Math.max(w1, w2) + padH * 2
-  const pillH = (line2 ? lh1 + lh2 + 2 : lh1) + padV * 2
-  const pillX = cx - pillW / 2, pillY = dotBottom + 4
-  ctx.fillStyle = pillBg
-  ctx.strokeStyle = pillBorder
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  if (typeof (ctx as CanvasRenderingContext2D & { roundRect?: unknown }).roundRect === 'function') {
-    ;(ctx as CanvasRenderingContext2D & { roundRect: (x: number, y: number, w: number, h: number, r: number) => void })
-      .roundRect(pillX, pillY, pillW, pillH, r)
-  } else {
-    ctx.moveTo(pillX + r, pillY)
-    ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, r)
-    ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, r)
-    ctx.arcTo(pillX, pillY + pillH, pillX, pillY, r)
-    ctx.arcTo(pillX, pillY, pillX + pillW, pillY, r)
-    ctx.closePath()
-  }
-  ctx.fill(); ctx.stroke()
-  ctx.fillStyle = textColor
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top'
-  ctx.font = `600 ${fs1}px system-ui,'Segoe UI',sans-serif`
-  ctx.fillText(label, cx, pillY + padV)
-  if (line2) {
-    ctx.font = `500 ${fs2}px system-ui,'Segoe UI',sans-serif`
-    ctx.globalAlpha = alpha * 0.92
-    ctx.fillText(line2, cx, pillY + padV + lh1 + 2)
-  }
-  ctx.restore()
-}
-
-// Draws one animation frame onto the provided canvas (which is reused across frames).
-function renderAnimFrame(
-  canvas: HTMLCanvasElement,
-  opts: {
-    data: AnimRenderData
-    viewport: { x: number; y: number; zoom: number }
-    getInactiveP: (id: string) => number
-    dpi: number
-    backgroundColor: string
-    showLabels: boolean
-    textColor: string
-    labelPillBg: string
-    labelPillBorder: string
-    mutedEdgeColor: string
-  },
-): ImageData {
-  const { data, viewport, getInactiveP, dpi, backgroundColor, textColor, labelPillBg, labelPillBorder, mutedEdgeColor } = opts
-  const fw = Math.max(1, Math.round(data.containerW * dpi))
-  const fh = Math.max(1, Math.round(data.containerH * dpi))
-  if (canvas.width !== fw) canvas.width = fw
-  if (canvas.height !== fh) canvas.height = fh
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })!
-
-  ctx.fillStyle = backgroundColor || '#16171d'
-  ctx.fillRect(0, 0, fw, fh)
-  ctx.save()
-  ctx.scale(dpi, dpi)
-  ctx.translate(viewport.x, viewport.y)
-  ctx.scale(viewport.zoom, viewport.zoom)
-
-  // ── Edges ──────────────────────────────────────────────────────────────
-  // Always use the palette's active edge colour; apply grayscale + alpha fade for inactive,
-  // mirroring exactly what the node renderer does.
-  for (const edge of data.edges) {
-    const ip = Math.max(getInactiveP(edge.source), getInactiveP(edge.target))
-    ctx.save()
-    const stroke = ip > 0.5 ? mutedEdgeColor : data.activeEdgeColor
-    ctx.strokeStyle = stroke
-    ctx.lineWidth = 1.5
-    ctx.globalAlpha = lerp(1, 0.55, ip)
-    if (ip > 0.001) ctx.filter = `grayscale(${ip})`
-    if (edge.isDashed) ctx.setLineDash([6, 5])
-    ctx.stroke(new Path2D(edge.pathD))
-    ctx.setLineDash([])
-    const ah = arrowheadFromPath(edge.pathD)
-    if (ah) {
-      const dx = ah.tx - ah.cp2x, dy = ah.ty - ah.cp2y
-      const len = Math.sqrt(dx * dx + dy * dy)
-      if (len > 0.5) {
-        const nx = dx / len, ny = dy / len, sz = 7
-        ctx.fillStyle = stroke
-        ctx.beginPath()
-        ctx.moveTo(ah.tx, ah.ty)
-        ctx.lineTo(ah.tx - nx * sz + ny * sz * 0.5, ah.ty - ny * sz - nx * sz * 0.5)
-        ctx.lineTo(ah.tx - nx * sz - ny * sz * 0.5, ah.ty - ny * sz + nx * sz * 0.5)
-        ctx.closePath()
-        ctx.fill()
-      }
-    }
-    ctx.restore()
-  }
-
-  // ── Nodes ──────────────────────────────────────────────────────────────
-  for (const node of data.nodes) {
-    const ip = getInactiveP(node.id)
-    const cx = node.x + node.w / 2
-    const cy = node.y + ANIM_DOT_PAD + ANIM_DOT_R
-    ctx.save()
-    ctx.globalAlpha = lerp(1, 0.42, ip)
-    if (ip > 0.001) ctx.filter = `grayscale(${ip})`
-    ctx.fillStyle = node.color
-    ctx.beginPath()
-    ctx.arc(cx, cy, ANIM_DOT_R, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.restore()
-    if (opts.showLabels && node.showLabel && node.label) {
-      renderNodeLabelOnCanvas(
-        ctx,
-        node.label,
-        node.labelLine2,
-        cx,
-        cy + ANIM_DOT_R,
-        lerp(1, 0.55, ip),
-        textColor,
-        labelPillBg,
-        labelPillBorder,
-      )
-    }
-  }
-
-  ctx.restore()
-  return ctx.getImageData(0, 0, fw, fh)
-}
-
-// Encodes pre-rendered ImageData frames into a video using MediaRecorder.
-// Progress (0–1) is reported via onProgress as frames are drawn in real-time.
-// Returns the blob and the actual file extension ('mp4' or 'webm').
-async function framesToVideoBlob(
-  frames: ImageData[],
-  fps: number,
-  onProgress?: (p: number) => void,
-): Promise<{ blob: Blob; ext: string }> {
-  if (frames.length === 0) throw new Error('No frames to encode')
-  const { width, height } = frames[0]
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas 2D unavailable')
-
-  // Prefer native MP4; fall back to WebM with the best available codec.
-  const candidates: { mime: string; ext: string }[] = [
-    { mime: 'video/mp4;codecs=avc1', ext: 'mp4' },
-    { mime: 'video/mp4;codecs=h264', ext: 'mp4' },
-    { mime: 'video/mp4', ext: 'mp4' },
-    { mime: 'video/webm;codecs=h264', ext: 'mp4' },
-    { mime: 'video/webm;codecs=vp9', ext: 'webm' },
-    { mime: 'video/webm;codecs=vp8', ext: 'webm' },
-    { mime: 'video/webm', ext: 'webm' },
-  ]
-  const chosen = candidates.find((c) => {
-    try { return MediaRecorder.isTypeSupported(c.mime) } catch { return false }
-  }) ?? { mime: 'video/webm', ext: 'webm' }
-
-  const stream = canvas.captureStream(fps)
-  const recorder = new MediaRecorder(stream, { mimeType: chosen.mime })
-  const chunks: Blob[] = []
-  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
-  const done = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: chosen.mime }))
-  })
-
-  const msPerFrame = 1000 / Math.max(1, fps)
-  recorder.start()
-  for (let i = 0; i < frames.length; i++) {
-    ctx.putImageData(frames[i], 0, 0)
-    onProgress?.((i + 1) / frames.length)
-    await new Promise((r) => setTimeout(r, msPerFrame))
-  }
-  recorder.stop()
-  return { blob: await done, ext: chosen.ext }
-}
-
-type AnimFormat = 'gif' | 'mp4'
-
-type GraphConfig = {
-  curvature: 'bezier' | 'smoothstep' | 'straight'
-  edgeWidth: number
-  edgeAnimated: boolean
-  backgroundVariant: BackgroundVariant
-}
-
-const DotNode = ({
-  data,
-  selected,
-  width,
-  height,
-  sourcePosition = Position.Bottom,
-  targetPosition = Position.Top,
-}: NodeProps<DotNodeType>) => {
-  const showLabel = (data as unknown as { showLabel?: boolean }).showLabel
-  const line2 = data.labelLine2
-  const a11yLabel =
-    line2 != null && line2 !== '' ? `${data.label}\n${line2}` : data.label
-  const inactive = (data as unknown as { inactive?: boolean }).inactive === true
-  // inactiveProgress (0–1) enables smooth animation; falls back to boolean inactive flag
-  const rawProgress = (data as unknown as { inactiveProgress?: number }).inactiveProgress
-  const inactiveP = rawProgress !== undefined ? rawProgress : (inactive ? 1 : 0)
-
-  const w = width ?? 36
-  const h = height ?? 36
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: w,
-        height: h,
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'flex-start',
-        padding: '4px 6px 6px',
-        overflow: 'visible',
-      }}
-      title={a11yLabel}
-      aria-label={a11yLabel}
-    >
-      <Handle
-        type="target"
-        position={targetPosition}
-        style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
-      />
-      <div
-        style={{
-          position: 'relative',
-          width: 18,
-          height: 18,
-          flexShrink: 0,
-          borderRadius: 999,
-          boxShadow: selected ? '0 0 0 3px rgba(250, 204, 21, 0.95)' : 'none',
-        }}
-      >
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            borderRadius: 999,
-            background: data.color ?? 'var(--accent)',
-            boxShadow: inactiveP > 0.5 ? 'none' : '0 6px 18px rgba(0,0,0,0.18)',
-            opacity: lerp(1, 0.42, inactiveP),
-            filter: `grayscale(${inactiveP})`,
-          }}
-        />
-      </div>
-
-      {showLabel ? (
-        <div
-          className="flow-node-label"
-          style={{
-            marginTop: 4,
-            pointerEvents: 'none',
-            padding: '4px 8px',
-            borderRadius: 10,
-            fontSize: 11,
-            lineHeight: '14px',
-            color: 'var(--text-h)',
-            background: 'rgba(0,0,0,0.30)',
-            border: '1px solid rgba(255,255,255,0.12)',
-            backdropFilter: 'blur(6px)',
-            maxWidth: '100%',
-            overflow: 'hidden',
-            textAlign: 'center',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 2,
-            opacity: lerp(1, 0.55, inactiveP),
-          }}
-        >
-          <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
-            {data.label}
-          </span>
-          {line2 != null && line2 !== '' ? (
-            <span
-              style={{
-                fontSize: 10,
-                lineHeight: '13px',
-                fontWeight: 500,
-                opacity: 0.92,
-                whiteSpace: 'nowrap',
-                maxWidth: '100%',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}
-            >
-              {line2}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-
-      <Handle
-        type="source"
-        position={sourcePosition}
-        style={{ opacity: 0, width: 8, height: 8, border: 'none' }}
-      />
-    </div>
-  )
-}
+import { DotNode, type GraphConfig } from './components/DotNode'
+import {
+  memberLabelsFromCount,
+  legendTitleFromColorBy,
+  legendValueLabel,
+} from './lib/legendHelpers'
+import {
+  type ExportFormat,
+  type ExportBackground,
+  elementToSvgText,
+  elementToRasterBlob,
+} from './lib/domExport'
+import {
+  type AnimKeyframe,
+  type AnimCurve,
+  type AnimFormat,
+  lerp,
+  applyEasing,
+  withAlpha,
+  extractAnimRenderData,
+  renderGifBlob,
+  renderVideoBlob,
+} from './lib/animRenderer'
 
 const SAMPLE_URL = '/jobs-sample.json'
 
-export default function FlowDemo() {
+export default function FlowGraph() {
   const config: GraphConfig = {
     curvature: 'bezier',
     edgeWidth: 1.5,
@@ -880,7 +107,7 @@ export default function FlowDemo() {
   const [chunksCount, setChunksCount] = useState(1)
   const [splitsCount, setSplitsCount] = useState(1)
   const [showLegend, setShowLegend] = useState(false)
-  const rfInstanceRef = useRef<ReactFlowInstance | null>(null)
+  const rfInstanceRef = useRef<ReactFlowInstance<DotNodeType, Edge<JobEdgeData>> | null>(null)
   const [flowReady, setFlowReady] = useState(false)
   const flowCanvasRef = useRef<HTMLDivElement | null>(null)
   const [exportingPng, setExportingPng] = useState(false)
@@ -944,7 +171,7 @@ export default function FlowDemo() {
 
   const { baseNodes, baseEdges } = useMemo(() => {
     if (jobRows === null || jobRows.length === 0) {
-      return { baseNodes: [] as DotNodeType[], baseEdges: [] as Edge[] }
+      return { baseNodes: [] as DotNodeType[], baseEdges: [] as Edge<JobEdgeData>[] }
     }
     const built = buildExpandedGraphFromJobs(jobRows, dimensionParams, {
       colorMode: nodeColorMode,
@@ -969,20 +196,20 @@ export default function FlowDemo() {
       // Re-enable only with a dedicated edge renderer and sensible arrow sizing/geometry.
       .filter((e) => e.source !== e.target)
       .map((e) => {
-      const d = e.data
-      const crossChunk = edgeCrossesChunkBoundaries(e.source, e.target, d)
-      return {
-        ...e,
+        const d = e.data
+        const crossChunk = edgeCrossesChunkBoundaries(e.source, e.target, d)
+        return {
+          ...e,
           type: config.curvature,
-        animated: config.edgeAnimated,
+          animated: config.edgeAnimated,
           markerEnd: { type: MarkerType.ArrowClosed, color: palette.edgeColor },
-        style: {
-          stroke: palette.edgeColor,
+          style: {
+            stroke: palette.edgeColor,
             strokeWidth: config.edgeWidth,
-          ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
-        },
-      }
-    })
+            ...(crossChunk ? { strokeDasharray: '6 5' } : {}),
+          },
+        }
+      })
     return { baseNodes: laidOut, baseEdges: styledEdges }
   }, [
     jobRows,
@@ -1027,7 +254,7 @@ export default function FlowDemo() {
         return {
           ...e,
           markerEnd: {
-            ...(e.markerEnd ?? { type: MarkerType.ArrowClosed }),
+            ...((e.markerEnd as EdgeMarker | undefined) ?? { type: MarkerType.ArrowClosed }),
             color: inactive ? mutedStroke : palette.edgeColor,
           },
           style: {
@@ -1303,21 +530,19 @@ export default function FlowDemo() {
     setAnimCancelRequested(false)
 
     try {
-      // ── Extract render data once (no per-frame DOM work) ───────────────
       const renderData = extractAnimRenderData(plottingArea, nodes, edges, palette.edgeColor)
       const fw = Math.max(1, Math.round(renderData.containerW * animDpi))
       const fh = Math.max(1, Math.round(renderData.containerH * animDpi))
 
-      // Reuse a single canvas across all frames (avoids GC pressure).
       const frameCanvas = document.createElement('canvas')
       frameCanvas.width = fw
       frameCanvas.height = fh
 
-      // Shared per-frame render helper used by both GIF and MP4 paths.
       const renderOpts = {
         data: renderData, dpi: animDpi, backgroundColor: bg,
         showLabels: showJobNames, textColor: textH, labelPillBg, labelPillBorder, mutedEdgeColor,
       }
+
       const buildVpAndInactiveP = (i: number) => {
         const t = N > 1 ? i / (N - 1) : 0
         const te = applyEasing(animCurve, t)
@@ -1338,56 +563,25 @@ export default function FlowDemo() {
 
       let blob: Blob
       let ext: string
-      let cancelled = false
 
       if (animFormat === 'gif') {
-        // ── GIF: stream render + LZW encode in a single loop ─────────────
-        const enc = new TextEncoder()
-        const gct = makeFixed256ColorTable()
-        const gifHeader = new Uint8Array([
-          ...enc.encode('GIF89a'),
-          ...u16le(fw), ...u16le(fh),
-          0b11110111, 0, 0,
-          ...Array.from(gct),
-          // No Netscape loop extension => play once (no forced looping)
-        ])
-        const delayCs = Math.max(1, Math.round(100 / Math.max(1, animFps)))
-        const frameHeader = new Uint8Array([
-          0x21, 0xf9, 0x04, 0x00, ...u16le(delayCs), 0x00, 0x00,
-          0x2c, ...u16le(0), ...u16le(0), ...u16le(fw), ...u16le(fh), 0x00,
-          0x08,
-        ])
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const gifChunks: any[] = [gifHeader]
-        for (let i = 0; i < N; i++) {
-          if (animCancelRef.current) { cancelled = true; break }
-          const { vp, getInactiveP } = buildVpAndInactiveP(i)
-          const imageData = renderAnimFrame(frameCanvas, { ...renderOpts, viewport: vp, getInactiveP })
-          gifChunks.push(frameHeader, toSubBlocks(lzwEncode8BitFast(rgbaToFixedPaletteIndices(imageData))))
-          setAnimProgress((i + 1) / N)
-          if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
-        }
-        if (cancelled) return
-        gifChunks.push(new Uint8Array([0x3b]))
-        blob = new Blob(gifChunks, { type: 'image/gif' })
+        const result = await renderGifBlob({
+          N, fw, fh, animFps, frameCanvas, renderOpts, buildVpAndInactiveP,
+          cancelRef: animCancelRef,
+          onProgress: (p) => setAnimProgress(p),
+        })
+        if (result.cancelled || !result.blob) return
+        blob = result.blob
         ext = 'gif'
       } else {
-        // ── MP4: phase 1 — render all frames to ImageData (0–70%) ────────
-        const prerendered: ImageData[] = []
-        for (let i = 0; i < N; i++) {
-          if (animCancelRef.current) { cancelled = true; break }
-          const { vp, getInactiveP } = buildVpAndInactiveP(i)
-          prerendered.push(renderAnimFrame(frameCanvas, { ...renderOpts, viewport: vp, getInactiveP }))
-          setAnimProgress(((i + 1) / N) * 0.7)
-          if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
-        }
-        if (cancelled) return
-        // ── MP4: phase 2 — MediaRecorder encodes at real-time speed (70–100%) ──
-        ;({ blob, ext } = await framesToVideoBlob(
-          prerendered,
-          animFps,
-          (p) => setAnimProgress(0.7 + p * 0.3),
-        ))
+        const result = await renderVideoBlob({
+          N, animFps, frameCanvas, renderOpts, buildVpAndInactiveP,
+          cancelRef: animCancelRef,
+          onProgress: (p) => setAnimProgress(p),
+        })
+        if (result.cancelled || !result.blob) return
+        blob = result.blob
+        ext = result.ext
       }
 
       const base =
@@ -1776,9 +970,9 @@ export default function FlowDemo() {
           </div>
         </div>
         <div className="flow-dim-help">
-          Each job’s <code>RUNNING</code> (<code>once</code> … <code>split</code>)
+          Each job's <code>RUNNING</code> (<code>once</code> … <code>split</code>)
           sets its base repetition level. A non-empty <code>SPLITS</code> value adds
-          job-split parts per Autosubmit “Job split” (numeric count or{' '}
+          job-split parts per Autosubmit "Job split" (numeric count or{' '}
           <code>auto</code> uses SPLITS here). Examples: <code>chunk</code> → members
           × chunks; <code>chunk</code> + <code>SPLITS</code> → multiply each chunk
           task by that split count; <code>RUNNING: split</code> uses the SPLITS
