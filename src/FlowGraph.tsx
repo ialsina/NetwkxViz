@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { flushSync } from 'react-dom'
 import {
@@ -533,9 +534,13 @@ export default function FlowGraph() {
   }, [])
 
   const onNodeClick = useCallback(
-    (e: { stopPropagation?: () => void }, node: { id: string }) => {
-      e.stopPropagation?.()
+    (e: ReactMouseEvent, node: { id: string }) => {
+      e.stopPropagation()
       if (interactionMode !== 'select') return
+
+      // React Flow applies additive / toggle-off selection when Control is held
+      // (see multiSelectionKeyCode on <ReactFlow />); skip our single-select override.
+      if (e.ctrlKey) return
 
       const clickedWasSelected =
         preClickNodeSelectedRef.current.get(node.id) === true
@@ -1221,7 +1226,7 @@ export default function FlowGraph() {
             title={
               interactionMode === 'pan'
                 ? 'Pan mode (click to switch to Select)'
-                : 'Select mode (click to switch to Pan)'
+                : 'Select mode (click to switch to Pan). Hold Control while clicking to add or remove nodes from the selection.'
             }
             style={{ minWidth: 76, justifyContent: 'center' }}
           >
@@ -1632,6 +1637,7 @@ export default function FlowGraph() {
               panOnDrag={interactionMode === 'pan'}
               selectionOnDrag={interactionMode === 'select'}
               selectionMode={SelectionMode.Partial}
+              multiSelectionKeyCode="Control"
               zoomOnScroll
               proOptions={{ hideAttribution: true }}
             >
